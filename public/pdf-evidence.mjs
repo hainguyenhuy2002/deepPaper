@@ -32,7 +32,7 @@ function textNodes(layer) {
   return nodes
 }
 
-export function createEvidenceNavigator({ scroll, eventBus, pageView, goToPage, currentPaper, notify }) {
+export function createEvidenceNavigator({ scroll, pageView, goToPage, currentPaper, loadPageText, notify }) {
   let version = 0
   let timer
   let flash
@@ -44,19 +44,38 @@ export function createEvidenceNavigator({ scroll, eventBus, pageView, goToPage, 
     flash = null
   }
 
-  function waitForText(number) {
-    const layer = pageView(number)?.querySelector('.textLayer')
-    if (layer?.querySelector('span')) return Promise.resolve(layer)
-    return new Promise(resolve => {
-      const timeout = setTimeout(finish, 2400)
-      const onText = event => { if (event.pageNumber === number) finish() }
-      function finish() {
-        clearTimeout(timeout)
-        eventBus.off('textlayerrendered', onText)
-        resolve(pageView(number)?.querySelector('.textLayer'))
+  async function locatePage(doc, number, quote) {
+    const here = await loadPageText(doc, number).catch(() => '')
+    if (locateQuote([here], quote)) return number
+    const nearby = [number - 1, number + 1].filter(page => page > 0 && page <= doc.pdf.numPages)
+    const matching = await Promise.all(nearby.map(async page => {
+      const text = await loadPageText(doc, page).catch(() => '')
+      return locateQuote([text], quote) ? page : null
+    }))
+    const exact = [...new Set([...matching.filter(Boolean), ...[...doc.texts]
+      .filter(([page, text]) => page !== number && locateQuote([text], quote)).map(([page]) => page)])]
+    return exact.length === 1 ? exact[0] : number
+  }
+
+  async function geometry(number, quote, current) {
+    const deadline = performance.now() + 6500
+    while (current() && performance.now() < deadline) {
+      const page = pageView(number)
+      const layer = page?.querySelector('.textLayer:not([hidden])')
+      if (layer?.querySelector('span')) {
+        const nodes = textNodes(layer)
+        const match = locateQuote(nodes.map(node => node.textContent), quote)
+        if (match) {
+          const range = document.createRange()
+          range.setStart(nodes[match.start.index], match.start.offset)
+          range.setEnd(nodes[match.end.index], match.end.offset)
+          const rects = rangeRects(range, page)
+          if (rects.length) return { page, rects }
+        }
       }
-      eventBus.on('textlayerrendered', onText)
-    })
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    return null
   }
 
   async function show(number, quote = '', { automatic = false } = {}) {
@@ -64,32 +83,34 @@ export function createEvidenceNavigator({ scroll, eventBus, pageView, goToPage, 
     if (!doc || number < 1 || number > doc.pdf.numPages) return false
     clear()
     const attempt = version
+    const current = () => attempt === version && doc === currentPaper()
     goToPage(number)
     if (!quote) return false
 
-    const layer = await waitForText(number)
-    if (attempt !== version || doc !== currentPaper()) return false
-    const page = pageView(number)
-    const nodes = layer ? textNodes(layer) : []
-    const match = locateQuote(nodes.map(node => node.textContent), quote)
-    if (!page || !match) {
-      if (!automatic) notify('Exact wording could not be located on this page.')
+    const target = await locatePage(doc, number, quote)
+    if (!current()) return false
+    if (target !== number) goToPage(target)
+    const matched = await geometry(target, quote, current)
+    if (!current()) return false
+    if (!matched) {
+      if (!automatic) notify('The quoted wording could not be found on this page.')
       return false
     }
-
-    const range = document.createRange()
-    range.setStart(nodes[match.start.index], match.start.offset)
-    range.setEnd(nodes[match.end.index], match.end.offset)
-    const rects = rangeRects(range, page)
-    if (!rects.length) return false
+    const { page, rects } = matched
     flash = document.createElement('div')
     flash.className = 'evidence-flash'
     flash.setAttribute('aria-hidden', 'true')
     flash.append(...rects.map(makeMark))
     page.append(flash)
     const bounds = scroll.getBoundingClientRect()
-    const firstY = page.getBoundingClientRect().top + rects[0][1] * page.clientHeight
+    const pageBounds = page.getBoundingClientRect()
+    const [x, y, width] = rects[0]
+    const firstY = pageBounds.top + y * page.clientHeight
+    const firstX = pageBounds.left + x * page.clientWidth
     scroll.scrollTop += firstY - bounds.top - Math.min(bounds.height * 0.3, 160)
+    if (firstX < bounds.left || firstX + width * page.clientWidth > bounds.right) {
+      scroll.scrollLeft += firstX - bounds.left - 25
+    }
     timer = setTimeout(() => {
       flash?.remove()
       flash = null

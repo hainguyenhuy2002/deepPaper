@@ -2,6 +2,7 @@ import DOMPurify from '/vendor/dompurify/dist/purify.es.mjs'
 import { Marked } from '/vendor/marked/lib/marked.esm.js'
 import katex from '/vendor/katex/dist/katex.mjs'
 import { mathExtensions } from './markdown-math.mjs'
+import { citationToken, unwrapMarkdown } from './answer-format.mjs'
 
 function formula(tex, displayMode) {
   return katex.renderToString(tex, { displayMode, trust: false, throwOnError: false, strict: 'ignore', maxExpand: 200, maxSize: 16 })
@@ -12,22 +13,17 @@ markdown.use({
   renderer: {
     html: () => '',
     code(token) {
-      if (token.lang?.trim() === 'math') return formula(token.text, true)
+      if (['math', 'latex', 'tex'].includes(token.lang?.trim().toLowerCase())) return formula(token.text, true)
       return false
     }
   },
   extensions: [...mathExtensions(formula), {
     name: 'paperPage',
     level: 'inline',
-    start: source => source.search(/\[\[?p{1,2}\.\s*\d/i),
-    tokenizer(source) {
-      const anchor = /^\[\[p\.\s*(\d{1,5})\|([^\n]{1,460}?)\]\]/i.exec(source)
-      if (anchor) return { type: 'paperPage', raw: anchor[0], page: Number(anchor[1]), quote: anchor[2].trim() }
-      const match = /^\[p{1,2}\.\s*(\d{1,5})(?:\s*[-–]\s*\d{1,5})?\]/i.exec(source)
-      if (match) return { type: 'paperPage', raw: match[0], page: Number(match[1]) }
-    },
+    start: source => source.search(/\[\[?(?:p{1,2}\.|pages?)\s*\d/i),
+    tokenizer: citationToken,
     renderer(token) {
-      const quoted = token.quote ? ' data-quote="' + encodeURIComponent(token.quote) + '"' : ''
+      const quoted = token.quote ? ' data-quote="' + encodeURIComponent(token.quote.toWellFormed()) + '"' : ''
       const action = token.quote ? 'Find evidence on PDF page ' : 'Open PDF page '
       const label = token.quote ? '[p. ' + token.page + ']' : token.raw
       return '<button type="button" class="page-citation" data-page="' + token.page + '"' + quoted +
@@ -116,7 +112,7 @@ async function renderDiagram(code) {
 
 export function renderAnswer(target, text, { streaming = false } = {}) {
   target.classList.add('answer-body')
-  target.innerHTML = DOMPurify.sanitize(markdown.parse(text), {
+  target.innerHTML = DOMPurify.sanitize(markdown.parse(unwrapMarkdown(text)), {
     USE_PROFILES: { html: true, mathMl: true, svg: true },
     ADD_ATTR: ['xmlns'],
     FORBID_TAGS: ['img', 'form', 'style', 'a', 'input', 'video', 'audio', 'foreignObject']

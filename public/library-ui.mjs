@@ -5,6 +5,7 @@ export function initLibrary({ api, openReader, closeReader }) {
   let folder = ''
   let opening = 0
   let refreshVersion = 0
+  let snapshot = ''
   let uploading = false
   const dialog = $('folder-dialog')
   const form = $('folder-form')
@@ -22,12 +23,10 @@ export function initLibrary({ api, openReader, closeReader }) {
 
   function render() {
     const current = folders.find(entry => entry._id === folder)
-    if (!current && folder !== 'unfiled') folder = ''
+    if (!current) folder = ''
     const known = new Set(folders.map(entry => entry._id))
-    const belongs = entry => known.has(entry.folder) ? entry.folder : 'unfiled'
-    const visible = folder ? papers.filter(entry => belongs(entry) === folder) : papers
-    const options = [{ name: 'All papers', _id: '' }, { name: 'Unfiled', _id: 'unfiled' }, ...folders]
-    $('folder-list').replaceChildren(...options.map(option => {
+    const visible = papers.filter(entry => (known.has(entry.folder) ? entry.folder : '') === folder)
+    $('folder-list').replaceChildren(...folders.map(option => {
       const row = document.createElement('div')
       row.className = 'folder-row'
       const el = button(option.name, () => {
@@ -38,25 +37,25 @@ export function initLibrary({ api, openReader, closeReader }) {
       el.className = 'folder-select'
       if (option._id === folder) el.setAttribute('aria-current', 'true')
       row.append(el)
-      if (known.has(option._id)) {
-        const menu = document.createElement('details')
-        const trigger = document.createElement('summary')
-        const actions = document.createElement('div')
-        menu.className = 'folder-menu'
-        trigger.textContent = '···'
-        trigger.title = 'Manage folder'
-        trigger.setAttribute('aria-label', 'Manage folder ' + option.name)
-        actions.append(button('Rename folder', () => { menu.open = false; editFolder('rename', option) }),
-          button('Remove folder', () => { menu.open = false; editFolder('remove', option) }))
-        menu.append(trigger, actions)
-        row.append(menu)
-      }
+      const menu = document.createElement('details')
+      const trigger = document.createElement('summary')
+      const actions = document.createElement('div')
+      menu.className = 'folder-menu'
+      trigger.textContent = '···'
+      trigger.title = 'Manage folder'
+      trigger.setAttribute('aria-label', 'Manage folder ' + option.name)
+      actions.append(button('Rename folder', () => { menu.open = false; editFolder('rename', option) }),
+        button('Remove folder', () => { menu.open = false; editFolder('remove', option) }))
+      menu.append(trigger, actions)
+      row.append(menu)
       return row
     }))
-    $('library-title').textContent = current?.name || (folder === 'unfiled' ? 'Unfiled' : 'All papers')
+    $('library-title').textContent = current?.name || 'Library'
+    $('library-root').hidden = !current
     $('library-count').textContent = visible.length + (visible.length === 1 ? ' paper' : ' papers')
     $('folder-actions').hidden = !current
     $('library-empty').hidden = Boolean(visible.length)
+    const openPaper = $('paper-list').querySelector('.paper-menu[open]')?.dataset.paper
     $('paper-list').replaceChildren(...visible.map(entry => {
       const card = document.createElement('article')
       card.className = 'paper-card'
@@ -67,29 +66,35 @@ export function initLibrary({ api, openReader, closeReader }) {
       meta.textContent = entry.bytes < 1024 * 1024
         ? Math.max(1, Math.round(entry.bytes / 1024)) + ' KB'
         : (entry.bytes / 1024 / 1024).toFixed(1) + ' MB'
+      const menu = document.createElement('details')
+      menu.className = 'paper-menu'
+      menu.dataset.paper = entry._id
+      menu.open = entry._id === openPaper
+      const trigger = document.createElement('summary')
+      trigger.setAttribute('aria-label', 'Manage paper ' + entry.title)
+      trigger.title = 'Manage paper'
+      trigger.textContent = '···'
       const controls = document.createElement('div')
-      controls.className = 'paper-controls'
-      const move = document.createElement('select')
-      move.setAttribute('aria-label', 'Move ' + entry.title + ' to folder')
-      move.append(new Option('Unfiled', ''), ...folders.map(f => new Option(f.name, f._id)))
-      move.value = known.has(entry.folder) ? entry.folder : ''
-      move.onchange = async () => {
-        move.disabled = true
-        try { await api('/api/papers/' + entry._id, { method: 'PATCH', data: { folder: move.value || null } }); await refresh() }
-        catch (error) { render(); status(error.message) }
-      }
-      controls.append(move, button('Rename', async () => {
+      const download = document.createElement('a')
+      download.href = '/api/papers/' + entry._id + '/pdf?download=1'
+      download.textContent = 'Download'
+      download.download = ''
+      download.onclick = () => { menu.open = false }
+      controls.append(button('Rename', async () => {
+        menu.open = false
         const title = prompt('Paper title', entry.title)?.trim()
         if (!title || title === entry.title) return
         await api('/api/papers/' + entry._id, { method: 'PATCH', data: { title } })
         await refresh()
-      }))
-      controls.append(button('Remove', async () => {
-        if (!confirm('Remove this PDF? Its notes and sessions will be available if you add it again.')) return
+      }), download, button('Delete', async () => {
+        menu.open = false
+        if (!confirm('Delete this PDF from the library? Its notes and sessions will be available if you add it again.')) return
         await api('/api/papers/' + entry._id, { method: 'DELETE' })
         await refresh()
+        status('Paper deleted.')
       }))
-      card.append(title, meta, controls)
+      menu.append(trigger, controls)
+      card.append(title, meta, menu)
       return card
     }))
   }
@@ -98,6 +103,9 @@ export function initLibrary({ api, openReader, closeReader }) {
     const version = ++refreshVersion
     const data = await api('/api/library')
     if (version !== refreshVersion) return
+    const next = JSON.stringify(data)
+    if (next === snapshot) return
+    snapshot = next
     folders = data.folders
     papers = data.papers
     render()
@@ -154,7 +162,7 @@ export function initLibrary({ api, openReader, closeReader }) {
     const removing = action === 'remove'
     $('folder-dialog-title').textContent = removing ? 'Remove folder' : action === 'rename' ? 'Rename folder' : 'New folder'
     const detail = $('folder-dialog-detail')
-    detail.textContent = removing ? 'Remove “' + entry.name + '”? Its papers will move to Unfiled.' : ''
+    detail.textContent = removing ? 'Remove “' + entry.name + '”? Its papers will move to Library.' : ''
     detail.hidden = !removing
     const input = $('folder-name')
     input.value = entry?.name || ''
@@ -202,11 +210,11 @@ export function initLibrary({ api, openReader, closeReader }) {
         await api('/api/folders/' + entry._id, { method: 'PATCH', data: { name } })
       } else {
         await api('/api/folders/' + entry._id, { method: 'DELETE' })
-        if (folder === entry._id) folder = 'unfiled'
+        if (folder === entry._id) folder = ''
       }
       dialog.close()
       await refresh()
-      if (action === 'remove') status('Folder removed. Its papers are in Unfiled.')
+      if (action === 'remove') status('Folder removed. Its papers are in Library.')
       $('folder-list').querySelector('[aria-current]')?.focus()
     } catch (error) {
       if (dialog.open) $('folder-dialog-status').textContent = error.message
@@ -216,6 +224,24 @@ export function initLibrary({ api, openReader, closeReader }) {
       $('cancel-folder').disabled = false
     }
   }
+  $('library-root').onclick = () => {
+    folder = ''
+    render()
+    $('library-title').focus()
+  }
+  document.addEventListener('click', event => {
+    for (const menu of document.querySelectorAll('.folder-menu[open], .paper-menu[open]')) {
+      if (!menu.contains(event.target)) menu.open = false
+    }
+  })
+  $('library').addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return
+    const menu = event.target.closest('.folder-menu[open], .paper-menu[open]')
+    if (menu) {
+      menu.open = false
+      menu.querySelector('summary').focus()
+    }
+  })
   $('back-library').onclick = () => { window.location.hash = '' }
   window.addEventListener('hashchange', route)
   route()

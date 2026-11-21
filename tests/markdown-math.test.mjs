@@ -35,3 +35,8 @@ test('keeps price text, escaped dollars, and code readable', () => {
 test('does not consume math markup that has yet to arrive in the stream', () => {
   assert.doesNotMatch(parse('Estimate\n$$\n\\frac{1}{n}'), /<formula/)
 })
+
+test('supports single-dollar math blocks on their own lines', () => {
+  const html = parse('Estimate\n\n$\n\\frac{1}{n}\n$\n\nDiscussion')
+  assert.match(html, /<formula data-display="true">\\frac\{1\}\{n\}<\/formula>/)
+})

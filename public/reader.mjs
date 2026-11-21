@@ -56,7 +56,7 @@ let toastTimer
 let selectionFrame
 let fitTimer
 let readerWidth = scroll.clientWidth
-const evidence = createEvidenceNavigator({ scroll, eventBus, pageView, goToPage, currentPaper: () => paper, notify })
+const evidence = createEvidenceNavigator({ scroll, pageView, goToPage, currentPaper: () => paper, loadPageText: pageText, notify })
 
 installPaneSplitter(byId('reader-window'), byId('chat-splitter'))
 new ResizeObserver(() => {
@@ -110,7 +110,9 @@ function updateControls() {
     button.disabled = loadingSessions || Boolean(request && button.dataset.idle)
   }
   byId('new-note').disabled = !paper
-  byId('summary').hidden = !paper || !toolsReady
+  const direct = byId('mode').value === 'llm'
+  question.placeholder = direct ? 'Message the model…' : 'Ask about the paper…'
+  byId('summary').hidden = !paper || !toolsReady || direct
   byId('summary').disabled = Boolean(request)
 }
 
@@ -690,6 +692,8 @@ messages.addEventListener('click', event => {
 const sessionsURL = doc => '/api/papers/' + doc.id + '/sessions'
 
 function renderSessions() {
+  const atBottom = nearBottom()
+  const scrollTop = messages.scrollTop
   const panel = byId('session-panel')
   const toggle = byId('toggle-sessions')
   panel.hidden = !sessionsVisible
@@ -756,6 +760,7 @@ function renderSessions() {
     const next = [...list.querySelectorAll('button')].find(button => button.dataset.sessionAction === focused)
     next?.focus({ preventScroll: true })
   }
+  messages.scrollTop = atBottom ? messages.scrollHeight : scrollTop
 }
 
 function userLabel(turn) {
@@ -763,8 +768,17 @@ function userLabel(turn) {
   return turn.page ? 'You · page ' + turn.page : 'You'
 }
 
+function restoreSessionSettings(entry) {
+  const mode = entry?.messages.findLast(turn => turn.role === 'user')?.mode
+  const choice = byId('mode')
+  if (mode && [...choice.options].some(option => option.value === mode)) choice.value = mode
+  const provider = entry?.messages.findLast(turn => turn.role === 'assistant')?.provider
+  if (provider && [...modelSelect.options].some(option => option.value === provider)) modelSelect.value = provider
+}
+
 function displaySession(entry) {
   session = entry
+  restoreSessionSettings(entry)
   clearReplySelection()
   for (const message of messages.querySelectorAll('.message')) message.remove()
   byId('ask-empty').hidden = Boolean(entry?.messages.length)
@@ -904,13 +918,13 @@ byId('ask-form').onsubmit = async event => {
   byId('chat-status').textContent = 'Preparing the question.'
   try {
     addMessage(userLabel({ page: selection?.page, replyExcerpt }), prompt, 'reader-message')
-    pending = addMessage(name, 'Preparing paper text…')
+    pending = addMessage(name, mode === 'llm' ? 'Opening conversation…' : 'Preparing paper text…')
     pending.classList.add('streaming-text')
-    const context = await getContext(doc, selection, controller.signal)
+    const context = mode === 'llm' ? undefined : await getContext(doc, selection, controller.signal)
     controller.signal.throwIfAborted()
     const current = session || await createSession(doc)
     controller.signal.throwIfAborted()
-    pending.textContent = 'Reading the paper…'
+    pending.textContent = mode === 'llm' ? 'Waiting for the reply…' : 'Reading the paper…'
     task.endpoint = sessionsURL(doc) + '/' + current._id
     const response = await fetch(task.endpoint + '/ask', {
       method: 'POST', signal: controller.signal,
@@ -937,8 +951,10 @@ byId('ask-form').onsubmit = async event => {
         session = { ...item, messages: [...current.messages, ...event.turns] }
         finishReply(pending, event.turns.at(-1).content)
         const first = [...pending.querySelectorAll('.page-citation[data-quote]')].find(reference => {
+          const quote = decodeURIComponent(reference.dataset.quote)
           const source = doc.texts.get(Number(reference.dataset.page))
-          return source && locateQuote([source], decodeURIComponent(reference.dataset.quote))
+          if (source && locateQuote([source], quote)) return true
+          return [...doc.texts.values()].filter(text => locateQuote([text], quote)).length === 1
         })
         if (first) evidence.show(Number(first.dataset.page), decodeURIComponent(first.dataset.quote), { automatic: true })
         renderSessions()
@@ -986,6 +1002,7 @@ byId('stop').onclick = () => {
   question.focus()
 }
 question.addEventListener('input', updateControls)
+byId('mode').addEventListener('change', updateControls)
 question.addEventListener('keydown', event => {
   if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.isComposing || event.keyCode === 229) return
   event.preventDefault()
@@ -1049,6 +1066,7 @@ api('/api/health').then(({ providers }) => {
   if (!providers.length) modelSelect.append(new Option('No model configured'))
   for (const provider of providers) modelSelect.add(new Option(provider.name, provider.id))
   toolsReady = Boolean(providers.length)
+  restoreSessionSettings(session)
   updateControls()
 }).catch(() => {
   modelSelect.options[0].text = 'Model unavailable'

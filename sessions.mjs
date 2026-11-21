@@ -1,13 +1,14 @@
 import { ObjectId } from 'mongodb'
 import { cleanName, objectId } from './library.mjs'
 import { modes } from './harness.mjs'
-import { explain, providers } from './models.mjs'
+import { respond, providers } from './models.mjs'
 
 export function validQuestion({ provider, scope, title, question, context, selection, selectionPage, replyExcerpt, mode = 'explain', history = [] }) {
-  return typeof provider === 'string' && Object.hasOwn(modes, mode) &&
+  return typeof provider === 'string' && (mode === 'llm' || Object.hasOwn(modes, mode)) &&
     ['paper', 'selection'].includes(scope) && typeof title === 'string' && title.length <= 400 &&
     typeof question === 'string' && question.trim() && question.length <= 4000 &&
-    typeof context === 'string' && context.trim() && context.length <= 360000 &&
+    ((mode === 'llm' && context === undefined) ||
+      (typeof context === 'string' && context.trim() && context.length <= 360000)) &&
     (scope !== 'selection' || (typeof selection === 'string' && selection.trim() && selection.length <= 12000 &&
       (selectionPage === undefined || (Number.isInteger(selectionPage) && selectionPage > 0)))) &&
     (replyExcerpt === undefined || (typeof replyExcerpt === 'string' && replyExcerpt.trim() && replyExcerpt.length <= 5000)) &&
@@ -22,7 +23,7 @@ export async function mountSessions(app, db) {
   const active = new Map()
   const path = '/api/papers/:paper/sessions'
   const itemPath = path + '/:session'
-  const summary = { projection: { messages: 0 } }
+  const summary = { projection: { messages: 0, threads: 0 } }
   const match = req => ({ _id: new ObjectId(req.params.session), paper: req.params.paper })
 
   app.param('session', (req, res, next, id) => {
@@ -44,7 +45,7 @@ export async function mountSessions(app, db) {
   })
 
   app.get(itemPath, async (req, res) => {
-    const session = await sessions.findOne(match(req))
+    const session = await sessions.findOne(match(req), { projection: { threads: 0 } })
     if (!session) return res.status(404).json({ error: 'Session not found.' })
     res.json(session)
   })
@@ -111,7 +112,22 @@ export async function mountSessions(app, db) {
         role,
         content: (replyExcerpt ? 'Quoted reply: ' + JSON.stringify(replyExcerpt) + '\nQuestion: ' + content : content).slice(0, 12000)
       }))
-      const answer = await explain({ ...input, history }, controller.signal, text => emit({ type: 'delta', text }))
+      const direct = input.mode === 'llm'
+      const providerThread = direct && input.provider !== 'openai' ? 'threads.' + input.provider : null
+      let thread
+      if (providerThread) {
+        // Claim the continuation once. A stopped turn is rebuilt from the saved transcript next time.
+        const before = await sessions.findOneAndUpdate({ ...filter, version: session.version },
+          { $unset: { [providerThread]: '' } }, { projection: { threads: 1 }, returnDocument: 'before' })
+        if (!before) {
+          emit({ type: 'error', error: 'The session changed. Reopen it to continue.' })
+          return
+        }
+        thread = before.threads?.[input.provider]
+      }
+      if (controller.signal.aborted) return
+      const { answer, threadId } = await respond({ ...input, history }, controller.signal,
+        text => emit({ type: 'delta', text }), { thread, transcript: direct ? session.messages : [] })
       if (controller.signal.aborted) return
       if (Buffer.byteLength(answer) > 200000) {
         emit({ type: 'error', error: 'The reply was too long to save. Try a narrower question.' })
@@ -119,13 +135,17 @@ export async function mountSessions(app, db) {
       }
       const turns = [
         { role: 'user', content: input.question, page: input.selectionPage || null, mode: input.mode || 'explain',
-          ...(input.replyExcerpt ? { replyExcerpt: input.replyExcerpt } : {}) },
+          ...(input.replyExcerpt ? { replyExcerpt: input.replyExcerpt } : {}),
+          ...(direct && input.selection ? { pdfExcerpt: input.selection } : {}) },
         { role: 'assistant', content: answer, provider: input.provider }
       ]
       const updated = await sessions.findOneAndUpdate({ ...filter, version: session.version }, {
         $push: { messages: { $each: turns } },
         $inc: { version: 1 },
-        $set: { updatedAt: new Date() }
+        $set: {
+          updatedAt: new Date(),
+          ...(providerThread && threadId ? { [providerThread]: { id: threadId, through: session.messages.length + 2 } } : {})
+        }
       }, { ...summary, returnDocument: 'after' })
       if (!updated) {
         emit({ type: 'error', error: 'The session changed while answering. Reopen it to continue.' })

@@ -30,7 +30,8 @@
     <section class="library-papers" aria-labelledby="library-title">
       <header class="library-heading">
         <div>
-          <h1 id="library-title">All papers</h1>
+          <button id="library-root" class="library-root" type="button" hidden>Library</button>
+          <h1 id="library-title" tabindex="-1">Library</h1>
           <p id="library-count"></p>
         </div>
         <div id="folder-actions" class="library-actions" hidden>
@@ -132,6 +133,7 @@
               <option value="explain">Explain</option>
               <option value="critique">Critique</option>
               <option value="brainstorm">Brainstorm</option>
+              <option value="llm">LLM</option>
             </select>
             <button id="send" class="primary" type="submit" disabled>Send</button>
             <button id="stop" class="stop-reply" type="button" hidden>Stop</button>

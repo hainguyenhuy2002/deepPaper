@@ -84,6 +84,7 @@ export async function mountLibrary(app, db) {
       else next(error)
     })
     res.once('close', () => source.destroy())
+    if (req.query.download === '1') res.attachment(/\.pdf$/i.test(entry.title) ? entry.title : entry.title + '.pdf')
     res.type('application/pdf').set('Content-Length', String(entry.bytes))
     source.pipe(res)
   })

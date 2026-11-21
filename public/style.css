@@ -167,7 +167,7 @@ dialog::backdrop { background: #182a2766; }
 .library-heading { margin-bottom: 12px; align-items: flex-start; flex-wrap: wrap; }
 .library-heading h1 { margin: 0; font: 700 clamp(1.7rem, 3vw, 2.35rem)/1.2 Georgia, serif; overflow-wrap: anywhere; }
 .library-heading p { margin: 6px 0 0; color: var(--muted); }
-.library-actions, .paper-controls { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+.library-actions { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
 #library-status { min-height: 1.5em; margin: 0 0 5px; color: var(--green-dark); }
 .paper-list { display: grid; gap: 10px; }
 .paper-card {
@@ -182,16 +182,6 @@ dialog::backdrop { background: #182a2766; }
 }
 .paper-title { text-align: left; color: var(--green-dark); font-weight: 650; border-color: transparent; overflow-wrap: anywhere; }
 .paper-meta { font-size: .85rem; color: var(--muted); }
-.paper-controls select {
-  min-height: 36px;
-  max-width: 100%;
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: white;
-  padding: 5px 8px;
-  font-size: .875rem;
-}
 .library-empty { border: 1px dashed #91aaa0; border-radius: 13px; padding: 25px 14px; text-align: center; }
 .library-empty p { margin: 0 0 12px; color: var(--muted); }
 .session-toolbar {
@@ -211,8 +201,6 @@ dialog::backdrop { background: #182a2766; }
   .folder-heading { margin-bottom: 3px; }
   #folder-list { display: flex; overflow: auto; }
   #folder-list .folder-select { flex: 0 0 auto; }
-  .paper-card { grid-template-columns: minmax(0, 1fr) auto; }
-  .paper-controls { grid-column: 1 / -1; padding-left: 9px; }
   .session-toolbar { padding: 5px 9px; }
 }
 
@@ -241,8 +229,8 @@ dialog::backdrop { background: #182a2766; }
 .folder-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px; }
 .folder-select { grid-column: 1; }
 .folder-row:not(:has(.folder-menu)) .folder-select { grid-column: 1 / -1; }
-.folder-menu { position: relative; min-width: 32px; }
-.folder-menu summary {
+:is(.folder-menu, .paper-menu) { position: relative; min-width: 32px; }
+:is(.folder-menu, .paper-menu) summary {
   display: grid;
   place-items: center;
   min-width: 32px;
@@ -253,9 +241,9 @@ dialog::backdrop { background: #182a2766; }
   border-radius: 6px;
   font-weight: 750;
 }
-.folder-menu summary::-webkit-details-marker { display: none; }
-.folder-menu summary:hover, .folder-menu[open] summary { background: var(--pale); }
-.folder-menu div {
+:is(.folder-menu, .paper-menu) summary::-webkit-details-marker { display: none; }
+:is(.folder-menu, .paper-menu) summary:hover, :is(.folder-menu, .paper-menu)[open] summary { background: var(--pale); }
+:is(.folder-menu, .paper-menu) div {
   position: absolute;
   right: 0;
   top: calc(100% + 4px);
@@ -269,7 +257,7 @@ dialog::backdrop { background: #182a2766; }
   background: white;
   box-shadow: 0 5px 15px #192c2925;
 }
-.folder-menu button { font-size: .84rem; white-space: nowrap; text-align: left; }
+:is(.folder-menu, .paper-menu) button { font-size: .84rem; white-space: nowrap; text-align: left; }
 .library-actions #delete-folder { color: #9a342e; }
 button.danger { background: #a13c36; border-color: #a13c36; }
 button.danger:hover:not(:disabled) { background: #812f2a; }
@@ -449,3 +437,25 @@ button.danger:hover:not(:disabled) { background: #812f2a; }
 .note-editor h3 { margin: 0; font-size: 1rem; }
 .note-editor #note-context { margin: 4px 0 9px; font-size: .88rem; }
 .note-editor #note-status:empty { display: none; }
+
+.library-root {
+  min-height: 28px;
+  padding: 0 1px;
+  margin-bottom: 4px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--green-dark);
+  font-size: .88rem;
+  text-decoration: underline;
+}
+.paper-menu div a {
+  display: block;
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: .84rem;
+  color: inherit;
+  text-decoration: none;
+}
+.paper-menu div a:hover { background: var(--pale); }
+.paper-menu div button:last-child { color: #96352e; }

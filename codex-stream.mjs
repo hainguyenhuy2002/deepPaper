@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 
-export function codexStream({ instructions, prompt, history }, signal, onText) {
+export function codexStream({ instructions, prompt, history, direct, threadId, replay = history }, signal, onText) {
   const config = process.env
   const cwd = fileURLToPath(new URL('./.runtime/job', import.meta.url))
   const env = {
@@ -20,6 +20,15 @@ export function codexStream({ instructions, prompt, history }, signal, onText) {
     ], { cwd, env, signal, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'ignore'] })
     const lines = createInterface({ input: process.stdout })
     let settled = false
+    let currentThread
+    let resuming = Boolean(direct && threadId)
+    const threadOptions = { cwd, approvalPolicy: 'never', sandbox: 'read-only' }
+    function startThread() {
+      send('thread/start', 2, {
+        ...threadOptions, ephemeral: !direct,
+        ...(instructions ? { developerInstructions: instructions } : {})
+      })
+    }
     function finish(error) {
       if (settled) return
       settled = true
@@ -27,7 +36,7 @@ export function codexStream({ instructions, prompt, history }, signal, onText) {
       process.stdin.end()
       process.kill('SIGTERM')
       if (error) reject(error)
-      else resolve()
+      else resolve(currentThread)
     }
     const fail = () => finish(new Error('Codex could not complete the request. Check the server connection and Codex sign-in.'))
     function send(message, id, params) {
@@ -39,16 +48,26 @@ export function codexStream({ instructions, prompt, history }, signal, onText) {
     lines.on('line', line => {
       let event
       try { event = JSON.parse(line) } catch { return }
-      if (event.error && event.id !== undefined && !event.method) return fail()
+      if (event.error && event.id !== undefined && !event.method) {
+        if (event.id === 2 && resuming) {
+          resuming = false
+          startThread()
+          return
+        }
+        return fail()
+      }
       if (event.method && event.id !== undefined) {
         process.stdin.write(JSON.stringify({ id: event.id, error: { code: -32601, message: 'Tool and approval requests are disabled.' } }) + '\n')
       } else if (event.id === 1) {
         send('initialized')
-        send('thread/start', 2, { cwd, ephemeral: true, approvalPolicy: 'never', sandbox: 'read-only', developerInstructions: instructions })
+        if (resuming) send('thread/resume', 2, { ...threadOptions, threadId, excludeTurns: true })
+        else startThread()
       } else if (event.id === 2) {
-        const prior = history.length ? 'Prior conversation (JSON)\n' + JSON.stringify(history) + '\n\n' : ''
+        currentThread = event.result.thread.id
+        const turns = direct && !resuming ? replay : history
+        const prior = turns.length ? 'Prior conversation (JSON)\n' + JSON.stringify(turns) + '\n\n' : ''
         send('turn/start', 3, {
-          threadId: event.result.thread.id, input: [{ type: 'text', text: prior + prompt, text_elements: [] }]
+          threadId: currentThread, input: [{ type: 'text', text: prior + prompt, text_elements: [] }]
         })
       } else if (event.method === 'item/agentMessage/delta') {
         onText(event.params.delta)

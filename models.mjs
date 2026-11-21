@@ -1,8 +1,10 @@
 import { existsSync } from 'node:fs'
 import { codexStream } from './codex-stream.mjs'
 import { readingTurn } from './harness.mjs'
+import { directMessages, directPrompt } from './direct-chat.mjs'
 
 const config = process.env
+const claudeThreadsBeta = 'message-threads-2026-08-12'
 
 export function providers() {
   const options = []
@@ -13,8 +15,8 @@ export function providers() {
   return options
 }
 
-function modelError(message) {
-  return Object.assign(new Error(message), { clientMessage: message })
+function modelError(message, metadata = {}) {
+  return Object.assign(new Error(message), { clientMessage: message, ...metadata })
 }
 
 async function* request(url, headers, body, signal) {
@@ -31,7 +33,12 @@ async function* request(url, headers, body, signal) {
   }
   if (response.status === 401 || response.status === 403) throw modelError('The provider rejected the server credentials.')
   if (response.status === 429) throw modelError('The provider rate or usage limit was reached.')
-  if (!response.ok) throw modelError('The model provider returned an error (' + response.status + ').')
+  if (!response.ok) {
+    const error = (await response.json().catch(() => ({}))).error
+    throw modelError('The model provider returned an error (' + response.status + ').', {
+      providerCode: error?.details?.error_code || error?.type
+    })
+  }
 
   const decoder = new TextDecoder()
   let buffer = ''
@@ -48,11 +55,55 @@ async function* request(url, headers, body, signal) {
   }
 }
 
-export async function explain(input, clientSignal, onText = () => {}) {
+async function claudeReply(messages, instructions, thread, signal, append) {
+  const events = request('https://api.anthropic.com/v1/messages', {
+    'x-api-key': config.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01',
+    ...(thread ? { 'anthropic-beta': claudeThreadsBeta } : {})
+  }, {
+    model: config.ANTHROPIC_MODEL || 'claude-sonnet-4-6', messages, max_tokens: 3200,
+    ...(instructions ? { system: instructions } : {}),
+    ...(thread ? { thread } : {})
+  }, signal)
+  let completed = false
+  let responseId
+  for await (const event of events) {
+    if (event.type === 'message_start') responseId = event.message?.id
+    if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') append(event.delta.text)
+    if (event.type === 'message_delta' && event.delta?.stop_reason === 'refusal') responseId = undefined
+    if (event.type === 'message_stop') completed = true
+  }
+  if (!completed) throw modelError('The Claude response ended early.')
+  return thread ? responseId : undefined
+}
+
+async function directClaude(next, messages, signal, append) {
+  const { threadId, pending, replay } = messages
+  if (threadId) {
+    try {
+      return await claudeReply([...pending, next], undefined,
+        { type: 'continue', previous_message_id: threadId }, signal, append)
+    } catch (error) {
+      if (!['thread_not_found', 'thread_already_continued', 'thread_continue_in_flight',
+        'thread_fingerprint_mismatch', 'thread_unsupported_request'].includes(error.providerCode)) throw error
+    }
+  }
+  try {
+    return await claudeReply([...replay, next], undefined, { type: 'create' }, signal, append)
+  } catch (error) {
+    if (error.providerCode !== 'thread_unsupported_request') throw error
+    return claudeReply([...replay, next], undefined, undefined, signal, append)
+  }
+}
+
+export async function respond(input, clientSignal, onText = () => {}, { thread, transcript = [] } = {}) {
   const { provider, history } = input
   const signal = AbortSignal.any([clientSignal, AbortSignal.timeout(120000)])
-  const { instructions, prompt } = readingTurn(input)
+  const direct = input.mode === 'llm'
+  const { instructions, prompt } = direct ? { prompt: directPrompt(input) } : readingTurn(input)
+  const next = { role: 'user', content: prompt }
+  const messages = direct ? directMessages(transcript, thread) : null
   let answer = ''
+  let threadId
   function append(text) {
     if (typeof text !== 'string' || !text) return
     answer += text
@@ -60,7 +111,10 @@ export async function explain(input, clientSignal, onText = () => {}) {
   }
   if (provider === 'codex') {
     try {
-      await codexStream({ instructions, prompt, history }, signal, append)
+      threadId = await codexStream({
+        instructions, prompt, direct, history: messages?.pending || history,
+        threadId: messages?.threadId, replay: messages?.replay
+      }, signal, append)
     } catch (error) {
       throw modelError(error.message)
     }
@@ -70,27 +124,22 @@ export async function explain(input, clientSignal, onText = () => {}) {
       Authorization: 'Bearer ' + config.OPENAI_API_KEY
     }, {
       model: config.OPENAI_MODEL || 'gpt-5.2', store: false, instructions,
-      input: [...history, { role: 'user', content: prompt }], max_output_tokens: 3200
+      input: [...(messages?.replay || history), next], max_output_tokens: 3200
     }, signal)
     for await (const event of events) {
       if (event.type === 'response.output_text.delta') append(event.delta)
       if (event.type === 'response.completed') completed = true
     }
     if (!completed) throw modelError('The OpenAI response ended early.')
+  } else if (direct) {
+    threadId = await directClaude(next, messages, signal, append)
   } else {
-    let completed = false
-    const events = request('https://api.anthropic.com/v1/messages', {
-      'x-api-key': config.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01'
-    }, {
-      model: config.ANTHROPIC_MODEL || 'claude-sonnet-4-6', system: instructions,
-      messages: [...history, { role: 'user', content: prompt }], max_tokens: 3200
-    }, signal)
-    for await (const event of events) {
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') append(event.delta.text)
-      if (event.type === 'message_stop') completed = true
-    }
-    if (!completed) throw modelError('The Claude response ended early.')
+    await claudeReply([...history, next], instructions, undefined, signal, append)
   }
-  if (!answer.trim()) throw modelError('The model returned no explanation.')
-  return answer
+  if (!answer.trim()) throw modelError('The model returned no reply.')
+  return { answer, threadId: direct ? threadId : undefined }
+}
+
+export async function explain(...args) {
+  return (await respond(...args)).answer
 }

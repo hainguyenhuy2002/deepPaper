@@ -9,7 +9,7 @@ export const instructions = [
   'Cite substantive claims using [[p. N|exact words from the paper]], with N replaced by the physical PDF page number. Copy a complete sentence or a distinctive contiguous passage of up to 400 characters verbatim from that page. Normalize line breaks to spaces. Use a plain [p. N] only when a quotation is unavailable. Only cite supplied evidence and say when it is insufficient.',
   'Before answering, identify what the reader is asking, match the relevant source evidence, and check whether that evidence supports the conclusion. In the answer, distinguish author claims, your analysis and speculation.',
   'Use LaTeX math delimiters for equations. When a workflow or relationship is clearer as a diagram, use a short valid Mermaid flowchart or sequence diagram with simple labels. Use Markdown tables for compact numeric comparisons.',
-  'Use clear Markdown. Lead with the direct answer. Preserve important metric definitions, baselines and units. Do not invent results or imply that you inspected figures that are absent from the text.'
+  'Write the reply in Markdown with ordinary paragraphs and short headings as needed. Reserve code fences for code and diagrams. Lead with the direct answer. Preserve important metric definitions, baselines and units. Do not invent results or imply that you inspected figures that are absent from the text.'
 ].join('\n')
 
 const stop = new Set('what which does about from have their these those with would could should paper study page into this that were they when where how then can and the for are'.split(' '))
