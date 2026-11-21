@@ -125,9 +125,10 @@ await mountLibrary(app, mongo.db())
 await mountSessions(app, mongo.db())
 
 const directory = name => fileURLToPath(new URL(name, import.meta.url))
-for (const vendor of ['pdfjs-dist', 'marked', 'dompurify']) {
+for (const vendor of ['pdfjs-dist', 'marked', 'dompurify', 'katex']) {
   app.use('/vendor/' + vendor, express.static(directory('./node_modules/' + vendor)))
 }
+app.use('/vendor/mermaid-tiny', express.static(directory('./node_modules/@mermaid-js/tiny/dist')))
 app.use(express.static(directory('./public')))
 app.use((_req, res) => res.status(404).json({ error: 'Not found.' }))
 app.use((error, _req, res, _next) => {

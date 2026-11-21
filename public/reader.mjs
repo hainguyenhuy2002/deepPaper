@@ -1,7 +1,7 @@
 import { AnnotationMode, getDocument, GlobalWorkerOptions } from '/vendor/pdfjs-dist/build/pdf.mjs'
 import { EventBus, PDFViewer } from '/vendor/pdfjs-dist/web/pdf_viewer.mjs'
-import DOMPurify from '/vendor/dompurify/dist/purify.es.mjs'
-import { marked } from '/vendor/marked/lib/marked.esm.js'
+import { renderAnswer } from './chat-answer.mjs'
+import { installPaneSplitter } from './pane-splitter.mjs'
 import { initLibrary } from './library-ui.mjs'
 
 const base = '/vendor/pdfjs-dist/'
@@ -41,6 +41,18 @@ let space = false
 let drag = null
 let toastTimer
 let selectionFrame
+let fitTimer
+let readerWidth = scroll.clientWidth
+
+installPaneSplitter(byId('reader-window'), byId('chat-splitter'))
+new ResizeObserver(() => {
+  if (scroll.clientWidth === readerWidth) return
+  readerWidth = scroll.clientWidth
+  clearTimeout(fitTimer)
+  if (readerWidth) fitTimer = setTimeout(() => {
+    if (paper && viewer.currentScaleValue === 'page-width') viewer.currentScaleValue = 'page-width'
+  }, 130)
+}).observe(scroll)
 
 async function api(url, { method = 'GET', data, signal } = {}) {
   const headers = { 'X-DeepPaper': '1' }
@@ -73,7 +85,11 @@ function clearPassage() {
 function updateControls() {
   question.disabled = !paper
   modelSelect.disabled = !toolsReady || Boolean(request)
-  byId('send').disabled = !paper || !toolsReady || loadingSessions || Boolean(request)
+  byId('send').disabled = !paper || !toolsReady || loadingSessions || Boolean(request) || !question.value.trim()
+  byId('send').hidden = Boolean(request)
+  byId('stop').hidden = !request
+  byId('stop').disabled = request?.controller.signal.aborted ?? true
+  byId('mode').disabled = Boolean(request)
   byId('session').disabled = !paper || loadingSessions || Boolean(request)
   byId('new-session').disabled = !paper || loadingSessions || Boolean(request)
   byId('rename-session').disabled = !session || loadingSessions || Boolean(request)
@@ -86,9 +102,10 @@ function updateControls() {
 function closeReader() {
   opening++
   sessionLoad++
-  request?.abort()
+  request?.controller.abort()
   request = null
   paper = null
+  byId('chat-status').textContent = ''
   clearPassage()
   if (noteDialog.open) noteDialog.close()
   viewer.setDocument(null)
@@ -449,6 +466,7 @@ function askPassage(selection) {
   question.focus()
   if (!question.value.trim()) question.value = 'Explain this passage in plain language.'
   question.select()
+  updateControls()
 }
 
 byId('ask-selection').onclick = () => askPassage(passage)
@@ -489,6 +507,30 @@ async function getContext(doc, selection, signal) {
   return pages.join('\n\n')
 }
 
+function nearBottom() {
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 76
+}
+
+function finishReply(body, text) {
+  body.classList.remove('streaming-text')
+  renderAnswer(body, text)
+  const copy = document.createElement('button')
+  copy.type = 'button'
+  copy.className = 'copy-reply'
+  copy.textContent = 'Copy reply'
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      copy.textContent = 'Copied'
+      byId('chat-status').textContent = 'Reply copied.'
+      setTimeout(() => { copy.textContent = 'Copy reply' }, 1600)
+    } catch {
+      notify('Clipboard access is unavailable.')
+    }
+  }
+  body.parentElement.append(copy)
+}
+
 function addMessage(label, text, className = '', markdown = false) {
   byId('ask-empty').hidden = true
   const entry = document.createElement('article')
@@ -497,14 +539,21 @@ function addMessage(label, text, className = '', markdown = false) {
   header.className = 'message-label'
   header.textContent = label
   const body = document.createElement('div')
-  if (markdown) {
-    body.innerHTML = DOMPurify.sanitize(marked.parse(text), { USE_PROFILES: { html: true }, FORBID_TAGS: ['img', 'form', 'style', 'a', 'input', 'button', 'video', 'audio'] })
-  } else body.textContent = text
   entry.append(header, body)
   messages.append(entry)
+  if (markdown) finishReply(body, text)
+  else body.textContent = text
   messages.scrollTop = messages.scrollHeight
   return body
 }
+
+messages.addEventListener('click', event => {
+  const reference = event.target.closest('.page-citation')
+  if (!reference || !paper) return
+  const page = Number(reference.dataset.page)
+  if (page > 0 && page <= paper.pdf.numPages) goToPage(page)
+  else notify('That page is outside this PDF.')
+})
 
 const sessionsURL = doc => '/api/papers/' + doc.id + '/sessions'
 
@@ -628,11 +677,22 @@ byId('ask-form').onsubmit = async event => {
   const mode = byId('mode').value
   const name = modelSelect.selectedOptions[0].textContent
   const controller = new AbortController()
-  request = controller
+  const task = { controller, id: crypto.randomUUID(), endpoint: null, stopping: null }
+  request = task
   question.value = ''
   updateControls()
   let pending
   let fragments = ''
+  let paintTimer
+  function paintReply() {
+    paintTimer = null
+    if (controller.signal.aborted || !pending?.isConnected) return
+    const follow = nearBottom()
+    if (fragments.length <= 28000) renderAnswer(pending, fragments, { streaming: true })
+    else pending.textContent = fragments
+    if (follow) messages.scrollTop = messages.scrollHeight
+  }
+  byId('chat-status').textContent = 'Preparing the question.'
   try {
     const current = session || await createSession(doc)
     controller.signal.throwIfAborted()
@@ -641,40 +701,53 @@ byId('ask-form').onsubmit = async event => {
     pending.classList.add('streaming-text')
     const context = await getContext(doc, selection, controller.signal)
     pending.textContent = 'Reading the paper…'
-    const response = await fetch(sessionsURL(doc) + '/' + current._id + '/ask', {
+    controller.signal.throwIfAborted()
+    task.endpoint = sessionsURL(doc) + '/' + current._id
+    const response = await fetch(task.endpoint + '/ask', {
       method: 'POST', signal: controller.signal,
       headers: { 'Content-Type': 'application/json', 'X-DeepPaper': '1' },
       body: JSON.stringify({
         provider, mode, scope: selection ? 'selection' : 'paper', title: doc.title, question: prompt,
-        context, selection: selection?.text, selectionPage: selection?.page
+        context, requestId: task.id, selection: selection?.text, selectionPage: selection?.page
       })
     })
     if (!response.ok) throw new Error((await response.json()).error || 'Could not ask the model.')
     let saved = false
     for await (const event of readEvents(response)) {
       if (event.type === 'delta') {
-        const follow = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 70
         fragments += event.text
-        pending.textContent = fragments
-        if (follow) messages.scrollTop = messages.scrollHeight
+        if (!paintTimer) paintTimer = setTimeout(paintReply, 65)
       } else if (event.type === 'error') {
         throw new Error(event.error)
       } else if (event.type === 'done') {
         saved = true
         const item = event.session
         sessions = [item, ...sessions.filter(entry => entry._id !== item._id)]
-        displaySession({ ...item, messages: [...current.messages, ...event.turns] })
+        const follow = nearBottom()
+        clearTimeout(paintTimer)
+        session = { ...item, messages: [...current.messages, ...event.turns] }
+        finishReply(pending, event.turns.at(-1).content)
+        renderSessions()
+        byId('chat-status').textContent = 'Reply ready.'
+        if (follow) messages.scrollTop = messages.scrollHeight
       }
     }
     if (!saved) throw new Error('The stream closed before the answer was saved.')
   } catch (error) {
-    if (controller.signal.aborted) return
+    if (request !== task || paper !== doc) return
     if (!pending) pending = addMessage(name, '')
-    pending.parentElement.classList.add('error')
-    pending.textContent = fragments ? fragments + '\n\n' + error.message : error.message
+    const stopped = controller.signal.aborted
+    const message = stopped ? 'Stopped before saving this reply.' : error.message
+    if (!stopped) pending.parentElement.classList.add('error')
+    pending.classList.remove('answer-body')
+    pending.classList.add('streaming-text')
+    pending.textContent = fragments ? fragments + '\n\n' + message : message
+    byId('chat-status').textContent = message
     if (!question.value.trim()) question.value = prompt
   } finally {
-    if (request === controller) {
+    clearTimeout(paintTimer)
+    if (task.stopping) await task.stopping
+    if (request === task) {
       request = null
       updateControls()
     }
@@ -684,13 +757,25 @@ byId('ask-form').onsubmit = async event => {
 byId('summary').onclick = () => {
   setScope(null)
   question.value = 'Summarize the paper’s research question, methods, main findings, and limitations.'
+  updateControls()
   byId('ask-form').requestSubmit()
 }
+
+byId('stop').onclick = () => {
+  const task = request
+  if (!task) return
+  if (task.endpoint) task.stopping = api(task.endpoint + '/stop', {
+    method: 'POST', data: { requestId: task.id }, signal: AbortSignal.timeout(5000)
+  }).catch(() => {})
+  task.controller.abort()
+  updateControls()
+  question.focus()
+}
+question.addEventListener('input', updateControls)
 question.addEventListener('keydown', event => {
-  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-    event.preventDefault()
-    byId('ask-form').requestSubmit()
-  }
+  if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  if (!byId('send').disabled) byId('ask-form').requestSubmit()
 })
 
 const { upload } = initLibrary({ api, openReader, closeReader })
@@ -721,8 +806,8 @@ document.addEventListener('dragleave', event => {
 })
 
 document.addEventListener('keydown', event => {
-  if (!paper || noteDialog.open || event.ctrlKey || event.metaKey || event.altKey || event.isComposing ||
-      event.target.closest?.('input, textarea, button, select, [contenteditable], .button')) return
+  if (!paper || event.defaultPrevented || noteDialog.open || event.ctrlKey || event.metaKey || event.altKey || event.isComposing ||
+      event.target.closest?.('input, textarea, button, select, summary, dialog, [role=separator], [contenteditable], .button')) return
   if (event.key === 'Escape') clearPassage()
   if (event.key === 'h' && passage) saveHighlight()
   if (event.key === 'n') showNote(passage)

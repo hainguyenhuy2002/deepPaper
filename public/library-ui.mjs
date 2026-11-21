@@ -4,7 +4,11 @@ export function initLibrary({ api, openReader, closeReader }) {
   let papers = []
   let folder = ''
   let opening = 0
+  let refreshVersion = 0
   let uploading = false
+  const dialog = $('folder-dialog')
+  const form = $('folder-form')
+  let folderAction = null
 
   function status(text) { $('library-status').textContent = text }
 
@@ -24,9 +28,30 @@ export function initLibrary({ api, openReader, closeReader }) {
     const visible = folder ? papers.filter(entry => belongs(entry) === folder) : papers
     const options = [{ name: 'All papers', _id: '' }, { name: 'Unfiled', _id: 'unfiled' }, ...folders]
     $('folder-list').replaceChildren(...options.map(option => {
-      const el = button(option.name, () => { folder = option._id; render() })
+      const row = document.createElement('div')
+      row.className = 'folder-row'
+      const el = button(option.name, () => {
+        folder = option._id
+        render()
+        $('folder-list').querySelector('[aria-current]')?.focus()
+      })
+      el.className = 'folder-select'
       if (option._id === folder) el.setAttribute('aria-current', 'true')
-      return el
+      row.append(el)
+      if (known.has(option._id)) {
+        const menu = document.createElement('details')
+        const trigger = document.createElement('summary')
+        const actions = document.createElement('div')
+        menu.className = 'folder-menu'
+        trigger.textContent = '···'
+        trigger.title = 'Manage folder'
+        trigger.setAttribute('aria-label', 'Manage folder ' + option.name)
+        actions.append(button('Rename folder', () => { menu.open = false; editFolder('rename', option) }),
+          button('Remove folder', () => { menu.open = false; editFolder('remove', option) }))
+        menu.append(trigger, actions)
+        row.append(menu)
+      }
+      return row
     }))
     $('library-title').textContent = current?.name || (folder === 'unfiled' ? 'Unfiled' : 'All papers')
     $('library-count').textContent = visible.length + (visible.length === 1 ? ' paper' : ' papers')
@@ -39,7 +64,9 @@ export function initLibrary({ api, openReader, closeReader }) {
       title.className = 'paper-title'
       const meta = document.createElement('span')
       meta.className = 'paper-meta'
-      meta.textContent = (entry.bytes / 1024 / 1024).toFixed(1) + ' MB'
+      meta.textContent = entry.bytes < 1024 * 1024
+        ? Math.max(1, Math.round(entry.bytes / 1024)) + ' KB'
+        : (entry.bytes / 1024 / 1024).toFixed(1) + ' MB'
       const controls = document.createElement('div')
       controls.className = 'paper-controls'
       const move = document.createElement('select')
@@ -68,7 +95,9 @@ export function initLibrary({ api, openReader, closeReader }) {
   }
 
   async function refresh() {
+    const version = ++refreshVersion
     const data = await api('/api/library')
+    if (version !== refreshVersion) return
     folders = data.folders
     papers = data.papers
     render()
@@ -120,26 +149,72 @@ export function initLibrary({ api, openReader, closeReader }) {
     finally { uploading = false }
   }
 
-  $('new-folder').onclick = async () => {
-    const name = prompt('Folder name')?.trim()
-    if (!name) return
-    try {
-      const entry = await api('/api/folders', { method: 'POST', data: { name } })
-      folder = entry._id
-      await refresh()
-    } catch (error) { status(error.message) }
+  function editFolder(action, entry) {
+    folderAction = { action, entry }
+    const removing = action === 'remove'
+    $('folder-dialog-title').textContent = removing ? 'Remove folder' : action === 'rename' ? 'Rename folder' : 'New folder'
+    const detail = $('folder-dialog-detail')
+    detail.textContent = removing ? 'Remove “' + entry.name + '”? Its papers will move to Unfiled.' : ''
+    detail.hidden = !removing
+    const input = $('folder-name')
+    input.value = entry?.name || ''
+    input.hidden = removing
+    input.required = !removing
+    $('folder-name-label').hidden = removing
+    $('folder-dialog-status').textContent = ''
+    const save = $('save-folder')
+    save.classList.toggle('danger', removing)
+    save.textContent = removing ? 'Remove folder' : action === 'rename' ? 'Save name' : 'Create folder'
+    dialog.showModal()
+    if (removing) $('cancel-folder').focus()
+    else { input.focus(); input.select() }
   }
-  $('rename-folder').onclick = async () => {
+
+  $('new-folder').onclick = () => editFolder('create')
+  $('rename-folder').onclick = () => {
     const current = folders.find(entry => entry._id === folder)
-    const name = current && prompt('Folder name', current.name)?.trim()
-    if (!name) return
-    try { await api('/api/folders/' + current._id, { method: 'PATCH', data: { name } }); await refresh() }
-    catch (error) { status(error.message) }
+    if (current) editFolder('rename', current)
   }
-  $('delete-folder').onclick = async () => {
-    if (!confirm('Remove this folder? Its papers will move to Unfiled.')) return
-    try { await api('/api/folders/' + folder, { method: 'DELETE' }); await refresh() }
-    catch (error) { status(error.message) }
+  $('delete-folder').onclick = () => {
+    const current = folders.find(entry => entry._id === folder)
+    if (current) editFolder('remove', current)
+  }
+  $('cancel-folder').onclick = () => dialog.close()
+  dialog.addEventListener('cancel', event => {
+    if ($('save-folder').disabled) event.preventDefault()
+  })
+  form.onsubmit = async event => {
+    event.preventDefault()
+    const { action, entry } = folderAction
+    const name = $('folder-name').value.trim()
+    if (action !== 'remove' && !name) {
+      $('folder-dialog-status').textContent = 'Enter a folder name.'
+      return
+    }
+    const save = $('save-folder')
+    save.disabled = true
+    $('cancel-folder').disabled = true
+    try {
+      if (action === 'create') {
+        const created = await api('/api/folders', { method: 'POST', data: { name } })
+        folder = created._id
+      } else if (action === 'rename') {
+        await api('/api/folders/' + entry._id, { method: 'PATCH', data: { name } })
+      } else {
+        await api('/api/folders/' + entry._id, { method: 'DELETE' })
+        if (folder === entry._id) folder = 'unfiled'
+      }
+      dialog.close()
+      await refresh()
+      if (action === 'remove') status('Folder removed. Its papers are in Unfiled.')
+      $('folder-list').querySelector('[aria-current]')?.focus()
+    } catch (error) {
+      if (dialog.open) $('folder-dialog-status').textContent = error.message
+      else status(error.message)
+    } finally {
+      save.disabled = false
+      $('cancel-folder').disabled = false
+    }
   }
   $('back-library').onclick = () => { window.location.hash = '' }
   window.addEventListener('hashchange', route)

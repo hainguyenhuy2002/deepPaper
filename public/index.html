@@ -6,6 +6,7 @@
   <title>deepPaper</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/vendor/pdfjs-dist/web/pdf_viewer.css">
+  <link rel="stylesheet" href="/vendor/katex/dist/katex.min.css">
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/reader.mjs"></script>
 </head>
@@ -86,7 +87,9 @@
       </div>
     </section>
 
-    <aside class="reading-sidebar" aria-label="Paper tools">
+    <div id="chat-splitter" class="chat-splitter" role="separator" tabindex="0" aria-label="Resize chat pane"
+         aria-controls="reading-sidebar" aria-orientation="vertical" title="Drag to resize chat. Double-click to reset."></div>
+    <aside id="reading-sidebar" class="reading-sidebar" aria-label="Paper tools">
       <div class="tabs" role="tablist" aria-label="Paper tools">
         <button type="button" id="ask-tab" role="tab" aria-selected="true" aria-controls="ask-panel">Ask AI</button>
         <button type="button" id="notes-tab" role="tab" aria-selected="false" aria-controls="notes-panel" tabindex="-1">Notes <span id="note-count"></span></button>
@@ -105,7 +108,7 @@
             </div>
           </details>
         </div>
-        <div id="messages" class="messages" aria-live="polite">
+        <div id="messages" class="messages" aria-label="Conversation">
           <div id="ask-empty" class="ask-empty">
             <h2>Ask about the paper</h2>
             <p>Ask about the whole paper or select a passage.</p>
@@ -113,6 +116,7 @@
           </div>
         </div>
         <form id="ask-form" class="composer">
+          <span id="chat-status" role="status" class="visually-hidden"></span>
           <div id="scope" class="scope">
             <div class="scope-heading">
               <span id="scope-title">Whole paper</span>
@@ -121,7 +125,7 @@
             <blockquote id="scope-text" hidden></blockquote>
           </div>
           <label class="visually-hidden" for="question">Your question</label>
-          <textarea id="question" rows="2" maxlength="4000" placeholder="What would you like to understand?" disabled required></textarea>
+          <textarea id="question" rows="2" maxlength="4000" enterkeyhint="send" placeholder="Ask about the paper…" aria-describedby="composer-shortcuts" disabled required></textarea>
           <div class="composer-actions">
             <label class="visually-hidden" for="provider">Model provider</label>
             <select id="provider" disabled><option>Connecting…</option></select>
@@ -131,8 +135,10 @@
               <option value="critique">Critique</option>
               <option value="brainstorm">Brainstorm</option>
             </select>
-            <button id="send" class="primary" type="submit" disabled>Ask</button>
+            <button id="send" class="primary" type="submit" disabled>Send</button>
+            <button id="stop" class="stop-reply" type="button" hidden>Stop</button>
           </div>
+          <div id="composer-shortcuts" class="composer-shortcuts">Enter to send · Shift+Enter for a new line</div>
         </form>
       </section>
 
@@ -145,6 +151,28 @@
       </section>
     </aside>
   </main>
+
+  <dialog id="folder-dialog" aria-labelledby="folder-dialog-title">
+    <form id="folder-form">
+      <h2 id="folder-dialog-title">New folder</h2>
+      <p id="folder-dialog-detail" hidden></p>
+      <label id="folder-name-label" for="folder-name">Folder name</label>
+      <input id="folder-name" type="text" maxlength="120">
+      <p id="folder-dialog-status" role="status"></p>
+      <div class="dialog-actions">
+        <button id="cancel-folder" type="button">Cancel</button>
+        <button id="save-folder" type="submit" class="primary">Create folder</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="diagram-dialog" aria-labelledby="diagram-title">
+    <header>
+      <h2 id="diagram-title">Diagram</h2>
+      <form method="dialog"><button type="submit" aria-label="Close diagram">Close</button></form>
+    </header>
+    <div class="diagram-display"></div>
+  </dialog>
 
   <dialog id="note-dialog">
     <form id="note-form">

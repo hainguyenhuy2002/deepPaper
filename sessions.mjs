@@ -18,7 +18,7 @@ export function validQuestion({ provider, scope, title, question, context, selec
 export async function mountSessions(app, db) {
   const sessions = db.collection('readingSessions')
   await sessions.createIndex({ paper: 1, updatedAt: -1 })
-  const active = new Set()
+  const active = new Map()
   const path = '/api/papers/:paper/sessions'
   const itemPath = path + '/:session'
   const summary = { projection: { messages: 0 } }
@@ -62,6 +62,16 @@ export async function mountSessions(app, db) {
     res.sendStatus(deletedCount ? 204 : 404)
   })
 
+  app.post(itemPath + '/stop', (req, res) => {
+    const key = req.params.session
+    const task = active.get(key)
+    if (task?.id && task.paper === req.params.paper && task.id === req.body?.requestId) {
+      task.controller.abort()
+      active.delete(key)
+    }
+    res.sendStatus(204)
+  })
+
   app.post(itemPath + '/ask', async (req, res) => {
     const input = req.body || {}
     if (!validQuestion(input)) return res.status(400).json({ error: 'The question or PDF text is missing or too long.' })
@@ -70,14 +80,19 @@ export async function mountSessions(app, db) {
     }
     const key = req.params.session
     const filter = match(req)
+    const controller = new AbortController()
+    const id = typeof input.requestId === 'string' && input.requestId.length === 36 ? input.requestId : null
+    const task = { id, paper: req.params.paper, controller }
+    function release() {
+      if (active.get(key) === task) active.delete(key)
+    }
+    res.once('close', () => { controller.abort(); release() })
     const session = await sessions.findOne(filter)
+    if (controller.signal.aborted) return
     if (!session) return res.status(404).json({ error: 'Session not found.' })
     if (active.has(key)) return res.status(409).json({ error: 'This session already has a question in progress.' })
     if (session.messages.length >= 120) return res.status(409).json({ error: 'Start a new session to continue this paper.' })
-    active.add(key)
-
-    const controller = new AbortController()
-    res.once('close', () => controller.abort())
+    active.set(key, task)
     res.type('application/x-ndjson').set('X-Accel-Buffering', 'no')
     res.flushHeaders()
     const emit = event => { if (!res.destroyed) res.write(JSON.stringify(event) + '\n') }
@@ -113,7 +128,7 @@ export async function mountSessions(app, db) {
     } catch (error) {
       emit({ type: 'error', error: error.clientMessage || 'The answer was interrupted. Try again.' })
     } finally {
-      active.delete(key)
+      release()
       clearInterval(heartbeat)
       if (!res.destroyed) res.end()
     }
