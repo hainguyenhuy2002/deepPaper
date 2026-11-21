@@ -3,13 +3,14 @@ import { cleanName, objectId } from './library.mjs'
 import { modes } from './harness.mjs'
 import { explain, providers } from './models.mjs'
 
-export function validQuestion({ provider, scope, title, question, context, selection, selectionPage, mode = 'explain', history = [] }) {
+export function validQuestion({ provider, scope, title, question, context, selection, selectionPage, replyExcerpt, mode = 'explain', history = [] }) {
   return typeof provider === 'string' && Object.hasOwn(modes, mode) &&
     ['paper', 'selection'].includes(scope) && typeof title === 'string' && title.length <= 400 &&
     typeof question === 'string' && question.trim() && question.length <= 4000 &&
     typeof context === 'string' && context.trim() && context.length <= 360000 &&
     (scope !== 'selection' || (typeof selection === 'string' && selection.trim() && selection.length <= 12000 &&
       (selectionPage === undefined || (Number.isInteger(selectionPage) && selectionPage > 0)))) &&
+    (replyExcerpt === undefined || (typeof replyExcerpt === 'string' && replyExcerpt.trim() && replyExcerpt.length <= 5000)) &&
     Array.isArray(history) && history.length <= 8 &&
     history.every(turn => ['user', 'assistant'].includes(turn?.role) &&
       typeof turn.content === 'string' && turn.content.length <= 12000)
@@ -49,9 +50,16 @@ export async function mountSessions(app, db) {
   })
 
   app.patch(itemPath, async (req, res) => {
-    const title = cleanName(req.body?.title)
-    if (!title) return res.status(400).json({ error: 'Enter a session title up to 120 characters.' })
-    const updated = await sessions.findOneAndUpdate(match(req), { $set: { title, updatedAt: new Date() } }, { ...summary, returnDocument: 'after' })
+    const { title, pinned } = req.body || {}
+    if ((title === undefined && pinned === undefined) ||
+        (title !== undefined && !cleanName(title)) ||
+        (pinned !== undefined && typeof pinned !== 'boolean')) {
+      return res.status(400).json({ error: 'Enter a valid session name or pin setting.' })
+    }
+    const changes = {}
+    if (title !== undefined) changes.title = title.trim()
+    if (pinned !== undefined) changes.pinned = pinned
+    const updated = await sessions.findOneAndUpdate(match(req), { $set: changes }, { ...summary, returnDocument: 'after' })
     if (!updated) return res.status(404).json({ error: 'Session not found.' })
     res.json(updated)
   })
@@ -99,7 +107,10 @@ export async function mountSessions(app, db) {
     const heartbeat = setInterval(() => emit({ type: 'ping' }), 12000)
 
     try {
-      const history = session.messages.slice(-8).map(({ role, content }) => ({ role, content: content.slice(0, 12000) }))
+      const history = session.messages.slice(-8).map(({ role, content, replyExcerpt }) => ({
+        role,
+        content: (replyExcerpt ? 'Quoted reply: ' + JSON.stringify(replyExcerpt) + '\nQuestion: ' + content : content).slice(0, 12000)
+      }))
       const answer = await explain({ ...input, history }, controller.signal, text => emit({ type: 'delta', text }))
       if (controller.signal.aborted) return
       if (Buffer.byteLength(answer) > 200000) {
@@ -107,7 +118,8 @@ export async function mountSessions(app, db) {
         return
       }
       const turns = [
-        { role: 'user', content: input.question, page: input.selectionPage || null, mode: input.mode || 'explain' },
+        { role: 'user', content: input.question, page: input.selectionPage || null, mode: input.mode || 'explain',
+          ...(input.replyExcerpt ? { replyExcerpt: input.replyExcerpt } : {}) },
         { role: 'assistant', content: answer, provider: input.provider }
       ]
       const updated = await sessions.findOneAndUpdate({ ...filter, version: session.version }, {

@@ -1,14 +1,14 @@
 # deepPaper
 
-Add PDFs by opening or dropping them into the library. Create folders, move papers between them, and click a paper to read it. The browser renders the PDF from MongoDB GridFS. The Notes tab lists saved highlights and notes and jumps to their pages.
+Add PDFs by opening or dropping them into the library. Create folders, move papers between them, and click a paper to read it. The browser renders the PDF from MongoDB GridFS. Select PDF text to add a colored highlight or click an existing highlight to change its color or remove it. The Notes tab lets you write and edit notes beside the paper.
 
-The Ask AI tab saves conversations per paper. Start, rename, reopen or delete a session. Choose **Explain**, **Critique** or **Brainstorm** before asking. The reading harness selects relevant page evidence for long papers, includes neighboring pages for a highlighted passage, and asks for page citations and an explicit distinction between findings and interpretation. The reader displays model text as it arrives and saves completed exchanges to MongoDB. Answers support LaTeX equations, Markdown tables and code, and Mermaid diagrams. Page citations jump directly to the PDF.
+The Ask AI tab saves conversations per paper. Show or hide the session list. Hover over a session to pin, rename or delete it. A new session stays blank until you send a question. Choose **Explain**, **Critique** or **Brainstorm** before asking. The reading harness selects relevant page evidence for long papers, includes neighboring pages for a highlighted passage, and asks for page citations and an explicit distinction between findings and interpretation. The reader displays model text as it arrives and saves completed exchanges to MongoDB. Answers support LaTeX equations, Markdown tables and code, and Mermaid diagrams. Quoted citations find and briefly highlight the supporting text in the PDF. Select text in an AI reply to quote it in a follow-up question.
 
 Removing a PDF removes its library listing and stored file. Re-adding an identical file restores its notes and sessions. Remove a folder from its menu to move its papers to Unfiled. Drag the divider between the PDF and chat to resize the panels, or focus it and use the arrow keys.
 
 | Shortcut | Action |
 | --- | --- |
-| H | Highlight selected text |
+| H | Highlight or unhighlight selected text |
 | N | Add a note to the selection or current page |
 | A | Ask about selected text |
 | V | Switch to the text selection tool |

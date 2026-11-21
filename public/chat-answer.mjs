@@ -19,13 +19,20 @@ markdown.use({
   extensions: [...mathExtensions(formula), {
     name: 'paperPage',
     level: 'inline',
-    start: source => source.search(/\[p{1,2}\.\s*\d/i),
+    start: source => source.search(/\[\[?p{1,2}\.\s*\d/i),
     tokenizer(source) {
+      const anchor = /^\[\[p\.\s*(\d{1,5})\|([^\n]{1,460}?)\]\]/i.exec(source)
+      if (anchor) return { type: 'paperPage', raw: anchor[0], page: Number(anchor[1]), quote: anchor[2].trim() }
       const match = /^\[p{1,2}\.\s*(\d{1,5})(?:\s*[-–]\s*\d{1,5})?\]/i.exec(source)
       if (match) return { type: 'paperPage', raw: match[0], page: Number(match[1]) }
     },
-    renderer: token => '<button type="button" class="page-citation" data-page="' + token.page +
-      '" title="Open PDF page ' + token.page + '">' + token.raw + '</button>'
+    renderer(token) {
+      const quoted = token.quote ? ' data-quote="' + encodeURIComponent(token.quote) + '"' : ''
+      const action = token.quote ? 'Find evidence on PDF page ' : 'Open PDF page '
+      const label = token.quote ? '[p. ' + token.page + ']' : token.raw
+      return '<button type="button" class="page-citation" data-page="' + token.page + '"' + quoted +
+        ' title="' + action + token.page + '">' + label + '</button>'
+    }
   }]
 })
 

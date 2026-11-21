@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { MongoClient, ObjectId } from 'mongodb'
 import { providers, explain } from './models.mjs'
+import { highlightColors } from './public/annotation-colors.mjs'
 import { mountLibrary } from './library.mjs'
 import { mountSessions, validQuestion } from './sessions.mjs'
 
@@ -67,30 +68,43 @@ app.get(annotationPath, async (req, res) => {
 })
 
 app.post(annotationPath, async (req, res) => {
-  const { page, text, rects, note = '' } = req.body || {}
-  if (!Number.isInteger(page) || page < 1 || page > 10000 ||
+  const { page, text, rects, note = '', color = 'yellow' } = req.body || {}
+  if (!Object.hasOwn(highlightColors, color) || !Number.isInteger(page) || page < 1 || page > 10000 ||
       typeof text !== 'string' || text.length > 12000 ||
       typeof note !== 'string' || note.length > 8000 ||
       !Array.isArray(rects) || rects.length > 500 || !rects.every(validRect) ||
       (rects.length ? !text.trim() : !note.trim())) {
     return res.status(400).json({ error: 'Enter a note or select a shorter passage on one page.' })
   }
-  const entry = { paper: req.params.paper, page, text, rects, note: note.trim(), createdAt: new Date() }
+  const entry = { paper: req.params.paper, page, text, rects, color, note: note.trim(), createdAt: new Date() }
   const { insertedId } = await annotations.insertOne(entry)
   res.status(201).json({ ...entry, _id: insertedId })
 })
 
 const entryPath = annotationPath + '/:annotation'
 app.patch(entryPath, async (req, res) => {
-  const note = req.body?.note
-  if (typeof note !== 'string' || note.length > 8000) {
-    return res.status(400).json({ error: 'Notes must be at most 8,000 characters.' })
+  const { note, color, highlighted } = req.body || {}
+  const filter = { _id: req.annotationId, paper: req.params.paper }
+  if (highlighted === false) {
+    const updated = await annotations.findOneAndUpdate(filter, { $set: { rects: [] } }, { returnDocument: 'after' })
+    if (!updated) return res.status(404).json({ error: 'Annotation not found.' })
+    if (updated.note) return res.json(updated)
+    const removed = await annotations.deleteOne({ ...filter, note: '', 'rects.0': { $exists: false } })
+    if (removed.deletedCount) return res.sendStatus(204)
+    const current = await annotations.findOne(filter)
+    if (!current) return res.sendStatus(204)
+    return res.json(current)
   }
-  const updated = await annotations.findOneAndUpdate(
-    { _id: req.annotationId, paper: req.params.paper, ...(note.trim() ? {} : { 'rects.0': { $exists: true } }) },
-    { $set: { note: note.trim() } },
-    { returnDocument: 'after' }
-  )
+  if ((note === undefined && color === undefined) ||
+      (note !== undefined && (typeof note !== 'string' || note.length > 8000)) ||
+      (color !== undefined && !Object.hasOwn(highlightColors, color))) {
+    return res.status(400).json({ error: 'Enter a valid note or highlight color.' })
+  }
+  const changes = {}
+  if (note !== undefined) changes.note = note.trim()
+  if (color !== undefined) changes.color = color
+  if (color !== undefined || changes.note === '') filter['rects.0'] = { $exists: true }
+  const updated = await annotations.findOneAndUpdate(filter, { $set: changes }, { returnDocument: 'after' })
   if (!updated) return res.status(404).json({ error: 'Annotation not found or note is empty.' })
   res.json(updated)
 })

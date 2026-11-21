@@ -12,7 +12,7 @@
 </head>
 <body>
   <header class="header">
-    <div class="brand">deep<span>Paper</span></div>
+    <a class="brand" href="/" aria-label="deepPaper library">deep<span>Paper</span></a>
     <button id="back-library" class="back-library" type="button" hidden>Library</button>
     <div id="filename" class="filename" title=""></div>
     <label class="button open" for="file" tabindex="0">Add PDF</label>
@@ -79,7 +79,8 @@
           </div>
         </div>
         <div id="selection-actions" class="selection-actions" role="group" aria-label="Selected passage" hidden>
-          <button id="highlight" type="button" title="Save highlight (H)">Highlight</button>
+          <button id="highlight" type="button" title="Toggle highlight (H)">Highlight</button>
+          <div id="highlight-colors" role="group" aria-label="Highlight colors"></div>
           <button id="note-selection" type="button" title="Add a note (N)">Add note</button>
           <button id="ask-selection" type="button" title="Ask about selection (A)">Ask AI</button>
         </div>
@@ -97,17 +98,14 @@
 
       <section id="ask-panel" class="panel" role="tabpanel" aria-labelledby="ask-tab">
         <div class="session-toolbar">
-          <label class="visually-hidden" for="session">Reading session</label>
-          <select id="session" aria-label="Reading session"></select>
+          <button id="toggle-sessions" type="button" aria-expanded="false" aria-controls="session-panel">Show sessions</button>
+          <span id="current-session" class="current-session"></span>
           <button id="new-session" type="button">New session</button>
-          <details class="session-actions">
-            <summary aria-label="Manage session">•••</summary>
-            <div>
-              <button id="rename-session" type="button">Rename session</button>
-              <button id="delete-session" type="button">Delete session</button>
-            </div>
-          </details>
         </div>
+        <div id="session-panel" class="session-panel" aria-label="Reading sessions" hidden>
+          <ul id="session-list"></ul>
+        </div>
+        <button id="ask-reply-selection" class="selection-actions" type="button" hidden>Ask about this</button>
         <div id="messages" class="messages" aria-label="Conversation">
           <div id="ask-empty" class="ask-empty">
             <h2>Ask about the paper</h2>
@@ -117,12 +115,12 @@
         </div>
         <form id="ask-form" class="composer">
           <span id="chat-status" role="status" class="visually-hidden"></span>
-          <div id="scope" class="scope">
+          <div id="scope" class="scope" hidden>
             <div class="scope-heading">
-              <span id="scope-title">Whole paper</span>
-              <button type="button" id="clear-scope" hidden>Clear</button>
+              <span id="scope-title"></span>
+              <button type="button" id="clear-scope">Clear</button>
             </div>
-            <blockquote id="scope-text" hidden></blockquote>
+            <blockquote id="scope-text"></blockquote>
           </div>
           <label class="visually-hidden" for="question">Your question</label>
           <textarea id="question" rows="2" maxlength="4000" enterkeyhint="send" placeholder="Ask about the paper…" aria-describedby="composer-shortcuts" disabled required></textarea>
@@ -147,7 +145,20 @@
           <h2>Highlights &amp; notes</h2>
           <button id="new-note" type="button" disabled>New note</button>
         </div>
-        <div id="notes-list" class="notes-list"></div>
+        <div id="notes-list" class="notes-list">
+          <form id="note-form" class="note-card note-editor" hidden>
+            <h3 id="note-heading">New note</h3>
+            <p id="note-context"></p>
+            <label class="visually-hidden" for="note-text">Note text</label>
+            <textarea id="note-text" rows="4" maxlength="8000" placeholder="Write your note…"></textarea>
+            <p id="note-status" role="status"></p>
+            <div class="dialog-actions">
+              <button id="cancel-note" type="button">Cancel</button>
+              <button id="save-note" class="primary" type="submit">Save note</button>
+            </div>
+          </form>
+          <div id="note-cards"></div>
+        </div>
       </section>
     </aside>
   </main>
@@ -174,18 +185,5 @@
     <div class="diagram-display"></div>
   </dialog>
 
-  <dialog id="note-dialog">
-    <form id="note-form">
-      <h2 id="note-heading">Add a note</h2>
-      <p id="note-context"></p>
-      <label class="visually-hidden" for="note-text">Note text</label>
-      <textarea id="note-text" rows="5" maxlength="8000" placeholder="Write your note…" autofocus></textarea>
-      <p id="note-status" role="status"></p>
-      <div class="dialog-actions">
-        <button id="cancel-note" type="button">Cancel</button>
-        <button id="save-note" class="primary" type="submit">Save note</button>
-      </div>
-    </form>
-  </dialog>
 </body>
 </html>

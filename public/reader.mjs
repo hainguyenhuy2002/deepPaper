@@ -3,6 +3,9 @@ import { EventBus, PDFViewer } from '/vendor/pdfjs-dist/web/pdf_viewer.mjs'
 import { renderAnswer } from './chat-answer.mjs'
 import { installPaneSplitter } from './pane-splitter.mjs'
 import { initLibrary } from './library-ui.mjs'
+import { locateQuote } from './evidence.mjs'
+import { highlightColors } from './annotation-colors.mjs'
+import { createEvidenceNavigator, makeMark, rangeRects } from './pdf-evidence.mjs'
 
 const base = '/vendor/pdfjs-dist/'
 GlobalWorkerOptions.workerSrc = base + 'build/pdf.worker.mjs'
@@ -13,12 +16,12 @@ const readerBody = scroll.parentElement
 const toolbar = byId('toolbar')
 const empty = byId('empty')
 const actions = byId('selection-actions')
-const noteDialog = byId('note-dialog')
 const noteForm = byId('note-form')
 const noteText = byId('note-text')
 const modelSelect = byId('provider')
 const question = byId('question')
 const messages = byId('messages')
+const replyAction = byId('ask-reply-selection')
 
 const eventBus = new EventBus()
 const viewer = new PDFViewer({ container: scroll, eventBus, annotationMode: AnnotationMode.DISABLE })
@@ -28,6 +31,16 @@ let opening = 0
 let loadingTask = null
 let stored = []
 let passage = null
+let clickedHighlight = null
+let annotationBusy = false
+let highlightColor = 'yellow'
+let replySelection = ''
+let sessionsVisible = false
+try {
+  const savedColor = localStorage.getItem('deeppaper-highlight-color')
+  if (Object.hasOwn(highlightColors, savedColor)) highlightColor = savedColor
+  sessionsVisible = localStorage.getItem('deeppaper-show-sessions') === 'true'
+} catch { /* Preferences are optional. */ }
 let scope = null
 let noteDraft = null
 let sessions = []
@@ -43,6 +56,7 @@ let toastTimer
 let selectionFrame
 let fitTimer
 let readerWidth = scroll.clientWidth
+const evidence = createEvidenceNavigator({ scroll, eventBus, pageView, goToPage, currentPaper: () => paper, notify })
 
 installPaneSplitter(byId('reader-window'), byId('chat-splitter'))
 new ResizeObserver(() => {
@@ -78,6 +92,7 @@ function annotationURL(doc = paper) {
 
 function clearPassage() {
   passage = null
+  clickedHighlight = null
   actions.hidden = true
   if (scroll.contains(window.getSelection()?.anchorNode)) window.getSelection().removeAllRanges()
 }
@@ -90,10 +105,10 @@ function updateControls() {
   byId('stop').hidden = !request
   byId('stop').disabled = request?.controller.signal.aborted ?? true
   byId('mode').disabled = Boolean(request)
-  byId('session').disabled = !paper || loadingSessions || Boolean(request)
   byId('new-session').disabled = !paper || loadingSessions || Boolean(request)
-  byId('rename-session').disabled = !session || loadingSessions || Boolean(request)
-  byId('delete-session').disabled = !session || loadingSessions || Boolean(request)
+  for (const button of byId('session-list').querySelectorAll('button')) {
+    button.disabled = loadingSessions || Boolean(request && button.dataset.idle)
+  }
   byId('new-note').disabled = !paper
   byId('summary').hidden = !paper || !toolsReady
   byId('summary').disabled = Boolean(request)
@@ -107,11 +122,12 @@ function closeReader() {
   paper = null
   byId('chat-status').textContent = ''
   clearPassage()
-  if (noteDialog.open) noteDialog.close()
+  closeNote()
+  clearReplySelection()
+  evidence.clear()
   viewer.setDocument(null)
   loadingTask?.destroy().catch(() => {})
   loadingTask = null
-  document.querySelector('.session-actions').open = false
   byId('reader-window').hidden = true
   byId('back-library').hidden = true
   byId('library').hidden = false
@@ -184,9 +200,9 @@ function paintHighlights(number) {
     page.append(layer)
   }
   const spans = stored.filter(item => item.page === number).flatMap(item => item.rects.map(rect => {
-    const [x, y, width, height] = rect.map(value => value * 100 + '%')
-    const span = document.createElement('span')
-    Object.assign(span.style, { left: x, top: y, width, height })
+    const span = makeMark(rect)
+    const color = highlightColors[item.color] || highlightColors.yellow
+    span.style.setProperty('--mark-color', color)
     return span
   }))
   layer.replaceChildren(...spans)
@@ -236,47 +252,108 @@ function pageOf(node) {
   return (node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement)?.closest('.textLayer')?.closest('.page')
 }
 
+function placeSelection(menu, container, selected) {
+  const frame = container.getBoundingClientRect()
+  if (selected.bottom <= frame.top || selected.top >= frame.bottom) return
+  menu.hidden = false
+  const maxLeft = Math.max(4, frame.width - menu.offsetWidth - 4)
+  menu.style.left = Math.max(4, Math.min(maxLeft, selected.left - frame.left)) + 'px'
+  const above = selected.top - frame.top - menu.offsetHeight - 8
+  menu.style.top = Math.max(4, Math.min(frame.height - menu.offsetHeight - 4,
+    above >= 4 ? above : selected.bottom - frame.top + 8)) + 'px'
+}
+
+function overlappingHighlight(current) {
+  const normalize = text => text.replace(/\s+/g, ' ').trim()
+  return stored.findLast(item => item.page === current.page && item.rects.length &&
+    normalize(item.text) === normalize(current.text) && item.rects.some(([x, y, w, h]) =>
+      current.rects.some(([left, top, width, height]) =>
+        left < x + w && left + width > x && top < y + h && top + height > y)))
+}
+
 function capturePassage() {
   actions.hidden = true
   passage = null
   const selection = window.getSelection()
-  if (!paper || hand || space || !selection || selection.isCollapsed || !selection.rangeCount) return
+  if (!paper || hand || space || !selection) return
+  let selected
+  if (!selection.isCollapsed && selection.rangeCount) {
+    const range = selection.getRangeAt(0)
+    const page = pageOf(range.startContainer)
+    if (!page || page !== pageOf(range.endContainer) || !scroll.contains(page)) return
+    const text = selection.toString().trim()
+    const rects = rangeRects(range, page)
+    if (!text || !rects.length) return
+    const current = { page: Number(page.dataset.pageNumber), text, rects }
+    passage = overlappingHighlight(current) || current
+    selected = range.getBoundingClientRect()
+  } else if (clickedHighlight) {
+    passage = stored.find(item => item._id === clickedHighlight && item.rects.length)
+    if (!passage) return
+    const bounds = pageView(passage.page)?.getBoundingClientRect()
+    if (!bounds) return
+    const [left, top, , height] = passage.rects[0]
+    selected = { left: bounds.left + left * bounds.width, top: bounds.top + top * bounds.height,
+      bottom: bounds.top + (top + height) * bounds.height }
+  }
+  if (!passage) return
+  byId('highlight').textContent = passage._id ? 'Unhighlight' : 'Highlight'
+  const currentColor = passage.color || highlightColor
+  for (const button of byId('highlight-colors').children) {
+    button.setAttribute('aria-pressed', String(button.dataset.color === currentColor))
+  }
+  placeSelection(actions, readerBody, selected)
+}
+
+function clearReplySelection() {
+  replySelection = ''
+  replyAction.hidden = true
+}
+
+function captureReplySelection() {
+  clearReplySelection()
+  const selection = window.getSelection()
+  if (!paper || request || !selection || selection.isCollapsed || !selection.rangeCount) return
   const range = selection.getRangeAt(0)
-  const page = pageOf(range.startContainer)
-  if (!page || page !== pageOf(range.endContainer) || !scroll.contains(page)) return
+  const bodyOf = node => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('.answer-body')
+  const body = bodyOf(range.startContainer)
+  if (!body || body !== bodyOf(range.endContainer) || !messages.contains(body) || body.classList.contains('streaming-text')) return
   const text = selection.toString().trim()
   if (!text) return
-  const bounds = page.getBoundingClientRect()
-  const rects = [...range.getClientRects()].flatMap(box => {
-    const left = Math.max(bounds.left, box.left)
-    const top = Math.max(bounds.top, box.top)
-    const width = Math.min(bounds.right, box.right) - left
-    const height = Math.min(bounds.bottom, box.bottom) - top
-    return width > 0.5 && height > 0.5
-      ? [[(left - bounds.left) / bounds.width, (top - bounds.top) / bounds.height, width / bounds.width, height / bounds.height]]
-      : []
-  })
-  if (!rects.length) return
-  passage = { page: Number(page.dataset.pageNumber), text, rects }
-  const selected = range.getBoundingClientRect()
-  const frame = readerBody.getBoundingClientRect()
-  if (selected.bottom <= frame.top || selected.top >= frame.bottom) return
-  actions.hidden = false
-  const maxLeft = Math.max(4, frame.width - actions.offsetWidth - 4)
-  actions.style.left = Math.max(4, Math.min(maxLeft, selected.left - frame.left)) + 'px'
-  const above = selected.top - frame.top - actions.offsetHeight - 8
-  actions.style.top = Math.max(4, Math.min(frame.height - actions.offsetHeight - 4,
-    above >= 4 ? above : selected.bottom - frame.top + 8)) + 'px'
+  replySelection = text
+  placeSelection(replyAction, byId('reading-sidebar'), range.getBoundingClientRect())
 }
 
 function queueSelection() {
   cancelAnimationFrame(selectionFrame)
-  selectionFrame = requestAnimationFrame(capturePassage)
+  selectionFrame = requestAnimationFrame(() => {
+    capturePassage()
+    captureReplySelection()
+  })
 }
 
 document.addEventListener('selectionchange', queueSelection)
-scroll.addEventListener('scroll', queueSelection, { passive: true })
-scroll.addEventListener('pointerup', queueSelection)
+scroll.addEventListener('scroll', () => {
+  clickedHighlight = null
+  queueSelection()
+}, { passive: true })
+messages.addEventListener('scroll', queueSelection, { passive: true })
+scroll.addEventListener('pointerup', event => {
+  clickedHighlight = null
+  if (!hand && !space && event.button === 0 && window.getSelection()?.isCollapsed) {
+    const page = event.target.closest('.page')
+    const bounds = page?.getBoundingClientRect()
+    if (bounds) {
+      const x = (event.clientX - bounds.left) / bounds.width
+      const y = (event.clientY - bounds.top) / bounds.height
+      clickedHighlight = stored.findLast(item => item.page === Number(page.dataset.pageNumber) &&
+        item.rects.some(([left, top, width, height]) => x >= left && x <= left + width && y >= top && y <= top + height))?._id
+    }
+  }
+  queueSelection()
+})
+messages.addEventListener('pointerup', queueSelection)
+replyAction.addEventListener('pointerdown', event => event.preventDefault())
 actions.addEventListener('pointerdown', event => event.preventDefault())
 
 function updateHand() {
@@ -317,7 +394,10 @@ function showTab(name, focus = false) {
 }
 
 byId('ask-tab').onclick = () => showTab('ask')
-byId('notes-tab').onclick = () => showTab('notes')
+byId('notes-tab').onclick = () => {
+  showTab('notes')
+  if (paper && !stored.length && !noteDraft) showNote()
+}
 document.querySelector('.tabs').addEventListener('keydown', event => {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
   event.preventDefault()
@@ -340,7 +420,7 @@ function addCardButton(card, text, action, tip = '') {
 }
 
 function renderNotes() {
-  const list = byId('notes-list')
+  const list = byId('note-cards')
   byId('note-count').textContent = stored.length || ''
   list.replaceChildren()
   if (!stored.length) {
@@ -352,6 +432,7 @@ function renderNotes() {
   for (const entry of stored) {
     const card = document.createElement('article')
     card.className = 'note-card'
+    if (entry.rects.length) card.style.setProperty('--note-mark', highlightColors[entry.color] || highlightColors.yellow)
     addCardButton(card, 'Page ' + entry.page, () => {
       goToPage(entry.page)
       const mark = entry.rects[0]
@@ -390,38 +471,64 @@ function renderNotes() {
   }
 }
 
-async function saveHighlight() {
-  if (!passage || !paper) return
+async function changeHighlight(color = highlightColor, toggle = false) {
+  if (!passage || !paper || annotationBusy) return
   const doc = paper
-  const selection = passage
-  if (selection.text.length > 12000 || selection.rects.length > 500) return notify('Select a shorter passage.')
+  const entry = passage
+  if (entry.text.length > 12000 || entry.rects.length > 500) return notify('Select a shorter passage.')
+  annotationBusy = true
+  highlightColor = color
+  try { localStorage.setItem('deeppaper-highlight-color', color) } catch { /* Preferences are optional. */ }
   clearPassage()
   try {
-    const entry = await api(annotationURL(doc), { method: 'POST', data: selection })
+    const updated = entry._id
+      ? await api(annotationURL(doc) + '/' + entry._id, {
+        method: 'PATCH', data: toggle ? { highlighted: false } : { color }
+      })
+      : await api(annotationURL(doc), { method: 'POST', data: { ...entry, color } })
     if (doc !== paper) return
-    stored.push(entry)
+    if (entry._id) {
+      stored = updated
+        ? stored.map(item => item._id === entry._id ? updated : item)
+        : stored.filter(item => item._id !== entry._id)
+    } else stored.push(updated)
     redraw()
-    notify('Highlight saved.')
+    notify(entry._id && toggle ? 'Highlight removed.' : 'Highlight saved.')
   } catch (error) { notify(error.message) }
+  finally { annotationBusy = false }
+}
+
+function closeNote() {
+  noteDraft = null
+  noteForm.hidden = true
 }
 
 function showNote(source = null) {
   if (!paper) return
+  showTab('notes')
+  if (!source && noteDraft && !noteDraft.entry._id) {
+    noteText.focus()
+    return
+  }
   const entry = source || { page: viewer.currentPageNumber, text: '', rects: [] }
   if (entry.text.length > 12000 || entry.rects.length > 500) return notify('Select a shorter passage.')
   noteDraft = { entry, doc: paper }
-  byId('note-heading').textContent = entry.note ? 'Edit note' : 'Add a note'
+  byId('note-heading').textContent = entry.note ? 'Edit note' : 'New note'
   byId('note-context').textContent = 'Page ' + entry.page + (entry.text ? ' · ' + entry.text.slice(0, 140) : '')
   byId('note-status').textContent = ''
   noteText.value = entry.note || ''
   noteText.required = !entry._id || !entry.rects.length
   clearPassage()
-  noteDialog.showModal()
+  noteForm.hidden = false
+  noteForm.scrollIntoView({ block: 'nearest' })
+  noteText.focus({ preventScroll: true })
 }
 
 noteForm.onsubmit = async event => {
   event.preventDefault()
-  const { entry, doc } = noteDraft
+  if (!noteDraft) return
+  const draft = noteDraft
+  const { entry, doc } = draft
   const note = noteText.value.trim()
   const button = byId('save-note')
   if (noteText.required && !note) {
@@ -432,29 +539,45 @@ noteForm.onsubmit = async event => {
   try {
     const updated = await api(annotationURL(doc) + (entry._id ? '/' + entry._id : ''), {
       method: entry._id ? 'PATCH' : 'POST',
-      data: entry._id ? { note } : { ...entry, note }
+      data: entry._id ? { note } : { ...entry, color: highlightColor, note }
     })
     if (doc !== paper) return
     if (entry._id) stored = stored.map(item => item._id === entry._id ? updated : item)
     else stored.push(updated)
     redraw()
-    if (noteDialog.open && noteDraft.entry === entry) noteDialog.close()
+    if (noteDraft === draft) {
+      closeNote()
+      byId('new-note').focus({ preventScroll: true })
+    }
     notify('Note saved.')
-  } catch (error) { byId('note-status').textContent = error.message }
-  finally { button.disabled = false }
+  } catch (error) {
+    if (noteDraft === draft) byId('note-status').textContent = error.message
+  } finally { button.disabled = false }
 }
 
-byId('cancel-note').onclick = () => noteDialog.close()
-byId('highlight').onclick = saveHighlight
+byId('cancel-note').onclick = closeNote
+byId('highlight').onclick = () => changeHighlight(passage?.color || highlightColor, true)
+for (const [name, color] of Object.entries(highlightColors)) {
+  const swatch = document.createElement('button')
+  swatch.type = 'button'
+  swatch.dataset.color = name
+  swatch.className = 'highlight-swatch'
+  swatch.title = name[0].toUpperCase() + name.slice(1) + ' highlight'
+  swatch.setAttribute('aria-label', swatch.title)
+  swatch.style.setProperty('--swatch', color)
+  swatch.onclick = () => changeHighlight(name)
+  byId('highlight-colors').append(swatch)
+}
 byId('note-selection').onclick = () => { if (passage) showNote(passage) }
 byId('new-note').onclick = () => showNote()
 
 function setScope(selection) {
   scope = selection
-  byId('scope-title').textContent = selection ? 'Selection · page ' + selection.page : 'Whole paper'
+  byId('scope').hidden = !selection
+  byId('scope-title').textContent = selection
+    ? selection.reply ? 'Reply excerpt' : 'Selection · page ' + selection.page
+    : ''
   byId('scope-text').textContent = selection?.text || ''
-  byId('scope-text').hidden = !selection
-  byId('clear-scope').hidden = !selection
 }
 
 function askPassage(selection) {
@@ -471,6 +594,14 @@ function askPassage(selection) {
 
 byId('ask-selection').onclick = () => askPassage(passage)
 byId('clear-scope').onclick = () => { setScope(null); question.focus() }
+replyAction.onclick = () => {
+  if (!replySelection) return
+  if (replySelection.length > 5000) return notify('Select a shorter excerpt from the reply.')
+  setScope({ text: replySelection, reply: true })
+  clearReplySelection()
+  window.getSelection()?.removeAllRanges()
+  question.focus()
+}
 
 async function pageText(doc, number) {
   if (doc.texts.has(number)) return doc.texts.get(number)
@@ -551,27 +682,96 @@ messages.addEventListener('click', event => {
   const reference = event.target.closest('.page-citation')
   if (!reference || !paper) return
   const page = Number(reference.dataset.page)
-  if (page > 0 && page <= paper.pdf.numPages) goToPage(page)
-  else notify('That page is outside this PDF.')
+  if (page > 0 && page <= paper.pdf.numPages) {
+    evidence.show(page, reference.dataset.quote ? decodeURIComponent(reference.dataset.quote) : '')
+  } else notify('That page is outside this PDF.')
 })
 
 const sessionsURL = doc => '/api/papers/' + doc.id + '/sessions'
 
 function renderSessions() {
-  const select = byId('session')
-  select.replaceChildren(new Option('Start a session', ''), ...sessions.map(item => new Option(item.title, item._id)))
-  select.value = session?._id || ''
+  const panel = byId('session-panel')
+  const toggle = byId('toggle-sessions')
+  panel.hidden = !sessionsVisible
+  toggle.textContent = sessionsVisible ? 'Hide sessions' : 'Show sessions'
+  toggle.setAttribute('aria-expanded', String(sessionsVisible))
+  byId('current-session').textContent = session?.title || ''
+  byId('current-session').title = session?.title || ''
+  const list = byId('session-list')
+  const focused = list.contains(document.activeElement) ? document.activeElement.dataset.sessionAction : null
+  list.replaceChildren()
+  if (!sessions.length) {
+    const empty = document.createElement('li')
+    empty.className = 'sessions-empty'
+    empty.textContent = 'Saved sessions appear after you ask a question.'
+    list.append(empty)
+  }
+  for (const item of [...sessions].sort((left, right) =>
+    Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)) ||
+    Date.parse(right.updatedAt) - Date.parse(left.updatedAt))) {
+    const row = document.createElement('li')
+    row.className = 'session-row'
+    if (item.pinned) row.classList.add('pinned-session')
+    const title = document.createElement('button')
+    const active = session?._id === item._id
+    title.type = 'button'
+    title.className = 'session-name'
+    title.textContent = item.title
+    title.title = item.title
+    title.dataset.idle = 'true'
+    title.dataset.sessionAction = item._id + '-open'
+    if (active) title.setAttribute('aria-current', 'true')
+    title.onclick = () => {
+      if (paper && !request) selectSession(paper, item._id).catch(error => notify(error.message))
+    }
+
+    const controls = document.createElement('div')
+    controls.className = 'session-row-actions'
+    for (const [name, action] of [
+      [item.pinned ? 'Unpin' : 'Pin', () => patchSession(item, { pinned: !item.pinned })],
+      ['Rename', () => {
+        const next = prompt('Session name', item.title)?.trim()
+        if (next && next !== item.title) return patchSession(item, { title: next })
+      }],
+      ['Delete', () => removeSession(item)]
+    ]) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.textContent = name
+      button.setAttribute('aria-label', name + ' session ' + item.title)
+      button.dataset.sessionAction = item._id + '-' + name.toLowerCase().replace('unpin', 'pin')
+      if (active && name === 'Delete') button.dataset.idle = 'true'
+      button.onclick = async () => {
+        button.disabled = true
+        try { await action() } catch (error) { notify(error.message) }
+        finally { button.disabled = false }
+      }
+      controls.append(button)
+    }
+    row.append(title, controls)
+    list.append(row)
+  }
   updateControls()
+  if (focused) {
+    const next = [...list.querySelectorAll('button')].find(button => button.dataset.sessionAction === focused)
+    next?.focus({ preventScroll: true })
+  }
+}
+
+function userLabel(turn) {
+  if (turn.replyExcerpt) return 'You · reply excerpt'
+  return turn.page ? 'You · page ' + turn.page : 'You'
 }
 
 function displaySession(entry) {
   session = entry
+  clearReplySelection()
   for (const message of messages.querySelectorAll('.message')) message.remove()
   byId('ask-empty').hidden = Boolean(entry?.messages.length)
   for (const turn of entry?.messages || []) {
     const model = [...modelSelect.options].find(option => option.value === turn.provider)?.textContent || turn.provider || 'AI'
     if (turn.role === 'assistant') addMessage(model, turn.content, '', true)
-    else addMessage(turn.page ? 'You · page ' + turn.page : 'You · whole paper', turn.content, 'reader-message')
+    else addMessage(userLabel(turn), turn.content, 'reader-message')
   }
   renderSessions()
 }
@@ -581,8 +781,12 @@ async function selectSession(doc, id) {
   loadingSessions = true
   updateControls()
   try {
-    const item = id ? await api(sessionsURL(doc) + '/' + id) : null
-    if (paper === doc && sessionLoad === version) displaySession(item)
+    const item = await api(sessionsURL(doc) + '/' + id)
+    if (paper === doc && sessionLoad === version) {
+      setScope(null)
+      evidence.clear()
+      displaySession(item)
+    }
   } finally {
     if (sessionLoad === version) {
       loadingSessions = false
@@ -591,7 +795,7 @@ async function selectSession(doc, id) {
   }
 }
 
-async function fetchSessions(doc, id) {
+async function fetchSessions(doc) {
   const version = ++sessionLoad
   loadingSessions = true
   updateControls()
@@ -599,7 +803,8 @@ async function fetchSessions(doc, id) {
     const list = await api(sessionsURL(doc))
     if (paper !== doc || sessionLoad !== version) return
     sessions = list
-    return await selectSession(doc, id || sessions[0]?._id)
+    if (sessions.length) await selectSession(doc, sessions[0]._id)
+    else renderSessions()
   } finally {
     if (sessionLoad === version) {
       loadingSessions = false
@@ -612,45 +817,48 @@ async function createSession(doc) {
   const item = await api(sessionsURL(doc), { method: 'POST' })
   if (paper === doc) {
     sessions = [item, ...sessions]
-    displaySession(item)
+    session = item
+    renderSessions()
   }
   return item
 }
 
-byId('session').onchange = event => {
-  if (paper) selectSession(paper, event.target.value).catch(error => { renderSessions(); notify(error.message) })
-}
-byId('new-session').onclick = async () => {
+async function patchSession(entry, data) {
   if (!paper) return
-  loadingSessions = true
-  updateControls()
-  try { await createSession(paper); question.focus() }
-  catch (error) { notify(error.message) }
-  finally { loadingSessions = false; updateControls() }
-}
-byId('rename-session').onclick = async () => {
-  document.querySelector('.session-actions').open = false
-  const title = prompt('Session name', session?.title)?.trim()
-  if (!title || !paper || !session) return
   const doc = paper
-  const id = session._id
-  try {
-    const item = await api(sessionsURL(doc) + '/' + id, { method: 'PATCH', data: { title } })
-    if (paper !== doc) return
-    sessions = sessions.map(entry => entry._id === id ? item : entry)
-    if (session?._id === id) session.title = item.title
-    renderSessions()
-  } catch (error) { notify(error.message) }
+  const item = await api(sessionsURL(doc) + '/' + entry._id, { method: 'PATCH', data })
+  if (paper !== doc) return
+  sessions = sessions.map(previous => previous._id === item._id ? item : previous)
+  if (session?._id === item._id) session = { ...session, ...item }
+  renderSessions()
 }
-byId('delete-session').onclick = async () => {
-  document.querySelector('.session-actions').open = false
-  if (!paper || !session || !confirm('Delete this session and its messages?')) return
+
+async function removeSession(entry) {
+  if (!paper || !confirm('Delete this session and its messages?')) return
   const doc = paper
-  const id = session._id
-  try {
-    await api(sessionsURL(doc) + '/' + id, { method: 'DELETE' })
-    if (paper === doc) await fetchSessions(doc)
-  } catch (error) { notify(error.message) }
+  await api(sessionsURL(doc) + '/' + entry._id, { method: 'DELETE' })
+  if (paper !== doc) return
+  sessions = sessions.filter(item => item._id !== entry._id)
+  if (session?._id === entry._id) {
+    question.value = ''
+    setScope(null)
+    displaySession(null)
+  } else renderSessions()
+  byId('toggle-sessions').focus({ preventScroll: true })
+}
+
+byId('toggle-sessions').onclick = () => {
+  sessionsVisible = !sessionsVisible
+  try { localStorage.setItem('deeppaper-show-sessions', String(sessionsVisible)) } catch { /* Preferences are optional. */ }
+  renderSessions()
+}
+byId('new-session').onclick = () => {
+  if (!paper || request || loadingSessions) return
+  setScope(null)
+  evidence.clear()
+  question.value = ''
+  displaySession(null)
+  question.focus()
 }
 
 async function* readEvents(response) {
@@ -672,7 +880,8 @@ byId('ask-form').onsubmit = async event => {
   const prompt = question.value.trim()
   if (!prompt || !paper || !toolsReady || loadingSessions || request) return
   const doc = paper
-  const selection = scope
+  const selection = scope?.reply ? null : scope
+  const replyExcerpt = scope?.reply ? scope.text : undefined
   const provider = modelSelect.value
   const mode = byId('mode').value
   const name = modelSelect.selectedOptions[0].textContent
@@ -694,21 +903,21 @@ byId('ask-form').onsubmit = async event => {
   }
   byId('chat-status').textContent = 'Preparing the question.'
   try {
-    const current = session || await createSession(doc)
-    controller.signal.throwIfAborted()
-    addMessage(selection ? 'You · page ' + selection.page : 'You · whole paper', prompt, 'reader-message')
+    addMessage(userLabel({ page: selection?.page, replyExcerpt }), prompt, 'reader-message')
     pending = addMessage(name, 'Preparing paper text…')
     pending.classList.add('streaming-text')
     const context = await getContext(doc, selection, controller.signal)
-    pending.textContent = 'Reading the paper…'
     controller.signal.throwIfAborted()
+    const current = session || await createSession(doc)
+    controller.signal.throwIfAborted()
+    pending.textContent = 'Reading the paper…'
     task.endpoint = sessionsURL(doc) + '/' + current._id
     const response = await fetch(task.endpoint + '/ask', {
       method: 'POST', signal: controller.signal,
       headers: { 'Content-Type': 'application/json', 'X-DeepPaper': '1' },
       body: JSON.stringify({
         provider, mode, scope: selection ? 'selection' : 'paper', title: doc.title, question: prompt,
-        context, requestId: task.id, selection: selection?.text, selectionPage: selection?.page
+        context, requestId: task.id, selection: selection?.text, selectionPage: selection?.page, replyExcerpt
       })
     })
     if (!response.ok) throw new Error((await response.json()).error || 'Could not ask the model.')
@@ -727,6 +936,11 @@ byId('ask-form').onsubmit = async event => {
         clearTimeout(paintTimer)
         session = { ...item, messages: [...current.messages, ...event.turns] }
         finishReply(pending, event.turns.at(-1).content)
+        const first = [...pending.querySelectorAll('.page-citation[data-quote]')].find(reference => {
+          const source = doc.texts.get(Number(reference.dataset.page))
+          return source && locateQuote([source], decodeURIComponent(reference.dataset.quote))
+        })
+        if (first) evidence.show(Number(first.dataset.page), decodeURIComponent(first.dataset.quote), { automatic: true })
         renderSessions()
         byId('chat-status').textContent = 'Reply ready.'
         if (follow) messages.scrollTop = messages.scrollHeight
@@ -806,10 +1020,10 @@ document.addEventListener('dragleave', event => {
 })
 
 document.addEventListener('keydown', event => {
-  if (!paper || event.defaultPrevented || noteDialog.open || event.ctrlKey || event.metaKey || event.altKey || event.isComposing ||
+  if (!paper || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.isComposing ||
       event.target.closest?.('input, textarea, button, select, summary, dialog, [role=separator], [contenteditable], .button')) return
   if (event.key === 'Escape') clearPassage()
-  if (event.key === 'h' && passage) saveHighlight()
+  if (event.key === 'h' && passage) changeHighlight(passage.color || highlightColor, true)
   if (event.key === 'n') showNote(passage)
   if (event.key === 'a' && passage) askPassage(passage)
   if (event.key === 'v') { hand = false; updateHand() }
