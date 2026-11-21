@@ -23,4 +23,6 @@ The browser renders the PDF and computes a fingerprint. MongoDB stores the finge
 4. Configure a model. Set `OPENAI_API_KEY` for the Responses API, `ANTHROPIC_API_KEY` for Claude, or `CODEX_BIN` and `CODEX_HOME` for a signed-in Codex CLI. Create `.runtime/job` before enabling Codex. Use a server that can reach the configured provider.
 5. Run `npm start`. The app listens on loopback. On the host, use `NGROK_AUTHTOKEN` with an ngrok agent and run `ngrok http http://127.0.0.1:8787 --inspect=false` to publish the HTTPS endpoint. Use the application credentials when opening it.
 
+For a local deployment, set `CODEX_HOME` to the directory holding your existing Codex sign-in. If your terminal needs a proxy to reach ChatGPT, set `HTTPS_PROXY` in `.env`. The Codex subprocess inherits the proxy settings.
+
 The PDF size limit is 50 MB. An AI question about the whole paper can include up to 360,000 characters of extracted text. For longer papers, select a passage.

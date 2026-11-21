@@ -53,6 +53,10 @@ function codex(prompt, signal) {
   return new Promise((resolve, reject) => {
     const env = {
       PATH: config.PATH, HOME: config.HOME, CODEX_HOME: config.CODEX_HOME,
+      HTTP_PROXY: config.HTTP_PROXY || config.http_proxy,
+      HTTPS_PROXY: config.HTTPS_PROXY || config.https_proxy,
+      ALL_PROXY: config.ALL_PROXY || config.all_proxy,
+      NO_PROXY: config.NO_PROXY || config.no_proxy,
       LANG: 'C.UTF-8'
     }
     const child = spawn(config.CODEX_BIN, args, { cwd: jobFolder, env, signal, killSignal: 'SIGKILL' })
