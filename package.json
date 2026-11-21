@@ -1,0 +1,19 @@
+{
+  "name": "deeppaper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node --env-file=.env server.mjs"
+  },
+  "dependencies": {
+    "dompurify": "3.4.18",
+    "express": "5.3.0",
+    "marked": "18.0.2",
+    "mongodb": "6.22.0",
+    "pdfjs-dist": "6.5.438"
+  }
+}

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>deepPaper</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/vendor/pdfjs-dist/web/pdf_viewer.css">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/reader.mjs"></script>
+</head>
+<body>
+  <header class="header">
+    <div class="brand">deep<span>Paper</span></div>
+    <div id="filename" class="filename" title=""></div>
+    <label class="button open" for="file" tabindex="0">Open PDF</label>
+    <input id="file" type="file" accept="application/pdf,.pdf" class="visually-hidden" tabindex="-1">
+  </header>
+
+  <main class="workspace">
+    <section class="reader" aria-label="PDF reader">
+      <div class="toolbar" id="toolbar" hidden>
+        <div class="group tool-switch" role="group" aria-label="Reader tool">
+          <button id="select-tool" type="button" title="Text selection (V)" aria-pressed="true">Select</button>
+          <button id="hand-tool" type="button" title="Drag to pan (Space)" aria-pressed="false">Hand</button>
+        </div>
+        <div class="group" aria-label="Page navigation">
+          <button id="prev" type="button" title="Previous page" aria-label="Previous page">‹</button>
+          <label class="visually-hidden" for="page-number">Page number</label>
+          <input id="page-number" type="number" min="1" value="1">
+          <span id="page-total"></span>
+          <button id="next" type="button" title="Next page" aria-label="Next page">›</button>
+        </div>
+        <div class="group zoom" aria-label="Zoom controls">
+          <button id="zoom-out" type="button" title="Zoom out (−)" aria-label="Zoom out">−</button>
+          <button id="zoom-fit" type="button" title="Fit page width" aria-label="Fit page width">Fit</button>
+          <button id="zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>
+        </div>
+      </div>
+
+      <div class="reader-body">
+        <div id="pdf-scroll" tabindex="0" aria-label="PDF pages" hidden>
+          <div id="viewer" class="pdfViewer"></div>
+        </div>
+        <div id="empty" class="empty">
+          <div class="upload">
+            <div class="paper-icon" aria-hidden="true"><span></span></div>
+            <h1>Open a research paper</h1>
+            <p>Drop a PDF here to start reading.</p>
+            <button id="choose" class="primary" type="button">Choose a PDF</button>
+          </div>
+        </div>
+        <div id="selection-actions" class="selection-actions" role="group" aria-label="Selected passage" hidden>
+          <button id="highlight" type="button" title="Save highlight (H)">Highlight</button>
+          <button id="note-selection" type="button" title="Add a note (N)">Add note</button>
+          <button id="ask-selection" type="button" title="Ask about selection (A)">Ask AI</button>
+        </div>
+        <div class="toast" id="reader-status" role="status" hidden></div>
+      </div>
+    </section>
+
+    <aside class="reading-sidebar" aria-label="Paper tools">
+      <div class="tabs" role="tablist" aria-label="Paper tools">
+        <button type="button" id="ask-tab" role="tab" aria-selected="true" aria-controls="ask-panel">Ask AI</button>
+        <button type="button" id="notes-tab" role="tab" aria-selected="false" aria-controls="notes-panel" tabindex="-1">Notes <span id="note-count"></span></button>
+      </div>
+
+      <section id="ask-panel" class="panel" role="tabpanel" aria-labelledby="ask-tab">
+        <div id="messages" class="messages" aria-live="polite">
+          <div id="ask-empty" class="ask-empty">
+            <h2>Ask about the paper</h2>
+            <p>Open a PDF, then ask about the whole paper or select a passage.</p>
+            <button id="summary" type="button" hidden>Summarize this paper</button>
+          </div>
+        </div>
+        <form id="ask-form" class="composer">
+          <div id="scope" class="scope">
+            <div class="scope-heading">
+              <span id="scope-title">Whole paper</span>
+              <button type="button" id="clear-scope" hidden>Clear</button>
+            </div>
+            <blockquote id="scope-text" hidden></blockquote>
+          </div>
+          <label class="visually-hidden" for="question">Your question</label>
+          <textarea id="question" rows="2" maxlength="4000" placeholder="What would you like to understand?" disabled required></textarea>
+          <div class="composer-actions">
+            <label class="visually-hidden" for="provider">Model provider</label>
+            <select id="provider" disabled><option>Connecting…</option></select>
+            <button id="send" class="primary" type="submit" disabled>Ask</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="notes-panel" class="panel notes-panel" role="tabpanel" aria-labelledby="notes-tab" hidden>
+        <div class="notes-header">
+          <h2>Highlights &amp; notes</h2>
+          <button id="new-note" type="button" disabled>New note</button>
+        </div>
+        <div id="notes-list" class="notes-list"></div>
+      </section>
+    </aside>
+  </main>
+
+  <dialog id="note-dialog">
+    <form id="note-form">
+      <h2 id="note-heading">Add a note</h2>
+      <p id="note-context"></p>
+      <label class="visually-hidden" for="note-text">Note text</label>
+      <textarea id="note-text" rows="5" maxlength="8000" placeholder="Write your note…" autofocus></textarea>
+      <p id="note-status" role="status"></p>
+      <div class="dialog-actions">
+        <button id="cancel-note" type="button">Cancel</button>
+        <button id="save-note" class="primary" type="submit">Save note</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
