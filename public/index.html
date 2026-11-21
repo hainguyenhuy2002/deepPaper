@@ -12,12 +12,41 @@
 <body>
   <header class="header">
     <div class="brand">deep<span>Paper</span></div>
+    <button id="back-library" class="back-library" type="button" hidden>Library</button>
     <div id="filename" class="filename" title=""></div>
-    <label class="button open" for="file" tabindex="0">Open PDF</label>
+    <label class="button open" for="file" tabindex="0">Add PDF</label>
     <input id="file" type="file" accept="application/pdf,.pdf" class="visually-hidden" tabindex="-1">
   </header>
 
-  <main class="workspace">
+  <main id="library" class="library" aria-label="Paper library">
+    <aside class="folders" aria-label="Folders">
+      <div class="folder-heading">
+        <h2>Folders</h2>
+        <button id="new-folder" type="button">New folder</button>
+      </div>
+      <nav id="folder-list" aria-label="Library folders"></nav>
+    </aside>
+    <section class="library-papers" aria-labelledby="library-title">
+      <header class="library-heading">
+        <div>
+          <h1 id="library-title">All papers</h1>
+          <p id="library-count"></p>
+        </div>
+        <div id="folder-actions" class="library-actions" hidden>
+          <button id="rename-folder" type="button">Rename folder</button>
+          <button id="delete-folder" type="button">Remove folder</button>
+        </div>
+      </header>
+      <p id="library-status" role="status"></p>
+      <div id="paper-list" class="paper-list"></div>
+      <div id="library-empty" class="library-empty" hidden>
+        <p>No papers here yet.</p>
+        <button id="choose" class="primary" type="button">Add a PDF</button>
+      </div>
+    </section>
+  </main>
+
+  <main id="reader-window" class="workspace" hidden>
     <section class="reader" aria-label="PDF reader">
       <div class="toolbar" id="toolbar" hidden>
         <div class="group tool-switch" role="group" aria-label="Reader tool">
@@ -45,9 +74,7 @@
         <div id="empty" class="empty">
           <div class="upload">
             <div class="paper-icon" aria-hidden="true"><span></span></div>
-            <h1>Open a research paper</h1>
-            <p>Drop a PDF here to start reading.</p>
-            <button id="choose" class="primary" type="button">Choose a PDF</button>
+            <h1>Opening PDF…</h1>
           </div>
         </div>
         <div id="selection-actions" class="selection-actions" role="group" aria-label="Selected passage" hidden>
@@ -66,10 +93,22 @@
       </div>
 
       <section id="ask-panel" class="panel" role="tabpanel" aria-labelledby="ask-tab">
+        <div class="session-toolbar">
+          <label class="visually-hidden" for="session">Reading session</label>
+          <select id="session" aria-label="Reading session"></select>
+          <button id="new-session" type="button">New session</button>
+          <details class="session-actions">
+            <summary aria-label="Manage session">•••</summary>
+            <div>
+              <button id="rename-session" type="button">Rename session</button>
+              <button id="delete-session" type="button">Delete session</button>
+            </div>
+          </details>
+        </div>
         <div id="messages" class="messages" aria-live="polite">
           <div id="ask-empty" class="ask-empty">
             <h2>Ask about the paper</h2>
-            <p>Open a PDF, then ask about the whole paper or select a passage.</p>
+            <p>Ask about the whole paper or select a passage.</p>
             <button id="summary" type="button" hidden>Summarize this paper</button>
           </div>
         </div>
@@ -86,6 +125,12 @@
           <div class="composer-actions">
             <label class="visually-hidden" for="provider">Model provider</label>
             <select id="provider" disabled><option>Connecting…</option></select>
+            <label class="visually-hidden" for="mode">Reading mode</label>
+            <select id="mode" aria-label="Reading mode">
+              <option value="explain">Explain</option>
+              <option value="critique">Critique</option>
+              <option value="brainstorm">Brainstorm</option>
+            </select>
             <button id="send" class="primary" type="submit" disabled>Ask</button>
           </div>
         </form>

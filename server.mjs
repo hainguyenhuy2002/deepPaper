@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { MongoClient, ObjectId } from 'mongodb'
 import { providers, explain } from './models.mjs'
+import { mountLibrary } from './library.mjs'
+import { mountSessions, validQuestion } from './sessions.mjs'
 
 const { APP_USER, APP_PASSWORD, MONGODB_URI, PORT = '8787' } = process.env
 if (!APP_USER || !APP_PASSWORD || !MONGODB_URI) {
@@ -101,14 +103,7 @@ app.delete(entryPath, async (req, res) => {
 let busy = false
 app.post('/api/ask', async (req, res) => {
   const { provider, scope, title, question, context, selection, history = [] } = req.body || {}
-  if (!['paper', 'selection'].includes(scope) ||
-      typeof title !== 'string' || title.length > 400 ||
-      typeof question !== 'string' || !question.trim() || question.length > 4000 ||
-      typeof context !== 'string' || !context.trim() || context.length > 360000 ||
-      (scope === 'selection' && (typeof selection !== 'string' || !selection.trim() || selection.length > 12000)) ||
-      !Array.isArray(history) || history.length > 8 ||
-      !history.every(turn => (turn?.role === 'user' || turn?.role === 'assistant') &&
-        typeof turn.content === 'string' && turn.content.length <= 12000)) {
+  if (!validQuestion({ provider, scope, title, question, context, selection, history })) {
     return res.status(400).json({ error: 'The question or PDF text is missing or too long.' })
   }
   if (!providers().some(item => item.id === provider)) {
@@ -126,6 +121,9 @@ app.post('/api/ask', async (req, res) => {
   }
 })
 
+await mountLibrary(app, mongo.db())
+await mountSessions(app, mongo.db())
+
 const directory = name => fileURLToPath(new URL(name, import.meta.url))
 for (const vendor of ['pdfjs-dist', 'marked', 'dompurify']) {
   app.use('/vendor/' + vendor, express.static(directory('./node_modules/' + vendor)))
@@ -134,6 +132,7 @@ app.use(express.static(directory('./public')))
 app.use((_req, res) => res.status(404).json({ error: 'Not found.' }))
 app.use((error, _req, res, _next) => {
   if (res.destroyed) return
+  if (error.code === 11000) return res.status(409).json({ error: 'That folder name is already in use.' })
   if (error.status === 400 || error.status === 413) {
     return res.status(error.status).json({ error: 'Invalid or oversized request.' })
   }

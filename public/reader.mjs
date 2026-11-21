@@ -2,6 +2,7 @@ import { AnnotationMode, getDocument, GlobalWorkerOptions } from '/vendor/pdfjs-
 import { EventBus, PDFViewer } from '/vendor/pdfjs-dist/web/pdf_viewer.mjs'
 import DOMPurify from '/vendor/dompurify/dist/purify.es.mjs'
 import { marked } from '/vendor/marked/lib/marked.esm.js'
+import { initLibrary } from './library-ui.mjs'
 
 const base = '/vendor/pdfjs-dist/'
 GlobalWorkerOptions.workerSrc = base + 'build/pdf.worker.mjs'
@@ -29,7 +30,10 @@ let stored = []
 let passage = null
 let scope = null
 let noteDraft = null
-let history = []
+let sessions = []
+let session = null
+let sessionLoad = 0
+let loadingSessions = false
 let request = null
 let toolsReady = false
 let hand = false
@@ -69,71 +73,85 @@ function clearPassage() {
 function updateControls() {
   question.disabled = !paper
   modelSelect.disabled = !toolsReady || Boolean(request)
-  byId('send').disabled = !paper || !toolsReady || Boolean(request)
+  byId('send').disabled = !paper || !toolsReady || loadingSessions || Boolean(request)
+  byId('session').disabled = !paper || loadingSessions || Boolean(request)
+  byId('new-session').disabled = !paper || loadingSessions || Boolean(request)
+  byId('rename-session').disabled = !session || loadingSessions || Boolean(request)
+  byId('delete-session').disabled = !session || loadingSessions || Boolean(request)
   byId('new-note').disabled = !paper
   byId('summary').hidden = !paper || !toolsReady
   byId('summary').disabled = Boolean(request)
 }
 
-async function openPDF(file) {
-  if (!file) return
-  if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') return notify('Choose a PDF file.')
-  if (file.size > 50 * 1024 * 1024) return notify('Choose a PDF under 50 MB.')
-  const attempt = ++opening
-  let task
-  notify('Opening PDF…')
-  try {
-    const data = await file.arrayBuffer()
-    const id = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', data)),
-      byte => byte.toString(16).padStart(2, '0')).join('')
-    task = getDocument({
-      data, isEvalSupported: false, cMapPacked: true,
-      cMapUrl: base + 'cmaps/', standardFontDataUrl: base + 'standard_fonts/',
-      wasmUrl: base + 'wasm/', iccUrl: base + 'iccs/'
-    })
-    const pdf = await task.promise
-    if (attempt !== opening) { await task.destroy(); return }
-    request?.abort()
-    request = null
-    clearPassage()
-    if (noteDialog.open) noteDialog.close()
-    const previous = loadingTask
-    viewer.setDocument(null)
-    loadingTask = task
-    if (previous) previous.destroy().catch(() => {})
+function closeReader() {
+  opening++
+  sessionLoad++
+  request?.abort()
+  request = null
+  paper = null
+  clearPassage()
+  if (noteDialog.open) noteDialog.close()
+  viewer.setDocument(null)
+  loadingTask?.destroy().catch(() => {})
+  loadingTask = null
+  document.querySelector('.session-actions').open = false
+  byId('reader-window').hidden = true
+  byId('back-library').hidden = true
+  byId('library').hidden = false
+  byId('filename').textContent = ''
+  byId('filename').title = ''
+}
 
-    const title = file.name.slice(0, 400)
-    paper = { id, pdf, title, texts: new Map() }
-    stored = []
-    history = []
-    for (const entry of messages.querySelectorAll('.message')) entry.remove()
-    byId('ask-empty').hidden = false
-    question.value = ''
-    const filename = byId('filename')
-    filename.textContent = title
-    filename.title = title
-    setScope(null)
-    empty.hidden = true
-    toolbar.hidden = false
-    scroll.hidden = false
-    viewer.setDocument(pdf)
-    scroll.focus({ preventScroll: true })
-    notify('')
-    updateControls()
-    renderNotes()
-    const doc = paper
-    const entries = await api(annotationURL(doc))
-    if (paper === doc) {
-      stored = entries
-      redraw()
-    }
-  } catch (error) {
-    if (task && task !== loadingTask) await task.destroy().catch(() => {})
-    if (attempt === opening) {
-      if (task && task === loadingTask) notify('Could not load annotations. ' + error.message)
-      else notify(error.name === 'PasswordException' ? 'Unlock this PDF before opening it.' : 'This PDF could not be opened.')
-    }
+async function openReader(entry) {
+  closeReader()
+  const attempt = ++opening
+  byId('library').hidden = true
+  byId('reader-window').hidden = false
+  byId('back-library').hidden = false
+  scroll.hidden = true
+  toolbar.hidden = true
+  empty.hidden = false
+  const filename = byId('filename')
+  filename.textContent = entry.title
+  filename.title = entry.title
+  byId('ask-empty').hidden = false
+  for (const message of messages.querySelectorAll('.message')) message.remove()
+  question.value = ''
+  session = null
+  sessions = []
+  stored = []
+  loadingSessions = false
+  setScope(null)
+  renderSessions()
+  renderNotes()
+  notify('')
+
+  const task = getDocument({
+    url: '/api/papers/' + entry._id + '/pdf', isEvalSupported: false,
+    cMapUrl: base + 'cmaps/', cMapPacked: true, standardFontDataUrl: base + 'standard_fonts/',
+    wasmUrl: base + 'wasm/', iccUrl: base + 'iccs/'
+  })
+  loadingTask = task
+  let pdf
+  try { pdf = await task.promise } catch (error) {
+    if (attempt !== opening) return
+    throw new Error(error.name === 'PasswordException' ? 'Unlock this PDF before opening it.' : 'This PDF could not be opened.')
   }
+  if (attempt !== opening) return
+  const doc = { id: entry._id, pdf, title: entry.title, texts: new Map() }
+  paper = doc
+  toolbar.hidden = false
+  scroll.hidden = false
+  empty.hidden = true
+  viewer.setDocument(pdf)
+  scroll.focus({ preventScroll: true })
+  updateControls()
+  await Promise.all([
+    api(annotationURL(doc)).then(entries => {
+      if (paper === doc) { stored = entries; redraw() }
+    }).catch(error => { if (paper === doc) notify(error.message) }),
+    fetchSessions(doc).catch(error => { if (paper === doc) notify(error.message) })
+  ])
 }
 
 function pageView(number) { return viewer.getPageView(number - 1)?.div }
@@ -447,8 +465,14 @@ async function pageText(doc, number) {
 
 async function getContext(doc, selection, signal) {
   if (selection) {
-    const text = await pageText(doc, selection.page)
-    return '[Page ' + selection.page + ']\n' + (text || selection.text).slice(0, 120000)
+    const pages = []
+    for (const number of [selection.page - 1, selection.page, selection.page + 1]) {
+      if (number < 1 || number > doc.pdf.numPages) continue
+      signal.throwIfAborted()
+      const text = await pageText(doc, number)
+      if (text || number === selection.page) pages.push('[Page ' + number + ']\n' + (text || selection.text).slice(0, 100000))
+    }
+    return pages.join('\n\n')
   }
   const pages = []
   let length = 0
@@ -482,37 +506,172 @@ function addMessage(label, text, className = '', markdown = false) {
   return body
 }
 
+const sessionsURL = doc => '/api/papers/' + doc.id + '/sessions'
+
+function renderSessions() {
+  const select = byId('session')
+  select.replaceChildren(new Option('Start a session', ''), ...sessions.map(item => new Option(item.title, item._id)))
+  select.value = session?._id || ''
+  updateControls()
+}
+
+function displaySession(entry) {
+  session = entry
+  for (const message of messages.querySelectorAll('.message')) message.remove()
+  byId('ask-empty').hidden = Boolean(entry?.messages.length)
+  for (const turn of entry?.messages || []) {
+    const model = [...modelSelect.options].find(option => option.value === turn.provider)?.textContent || turn.provider || 'AI'
+    if (turn.role === 'assistant') addMessage(model, turn.content, '', true)
+    else addMessage(turn.page ? 'You · page ' + turn.page : 'You · whole paper', turn.content, 'reader-message')
+  }
+  renderSessions()
+}
+
+async function selectSession(doc, id) {
+  const version = ++sessionLoad
+  loadingSessions = true
+  updateControls()
+  try {
+    const item = id ? await api(sessionsURL(doc) + '/' + id) : null
+    if (paper === doc && sessionLoad === version) displaySession(item)
+  } finally {
+    if (sessionLoad === version) {
+      loadingSessions = false
+      updateControls()
+    }
+  }
+}
+
+async function fetchSessions(doc, id) {
+  const version = ++sessionLoad
+  loadingSessions = true
+  updateControls()
+  try {
+    const list = await api(sessionsURL(doc))
+    if (paper !== doc || sessionLoad !== version) return
+    sessions = list
+    return await selectSession(doc, id || sessions[0]?._id)
+  } finally {
+    if (sessionLoad === version) {
+      loadingSessions = false
+      updateControls()
+    }
+  }
+}
+
+async function createSession(doc) {
+  const item = await api(sessionsURL(doc), { method: 'POST' })
+  if (paper === doc) {
+    sessions = [item, ...sessions]
+    displaySession(item)
+  }
+  return item
+}
+
+byId('session').onchange = event => {
+  if (paper) selectSession(paper, event.target.value).catch(error => { renderSessions(); notify(error.message) })
+}
+byId('new-session').onclick = async () => {
+  if (!paper) return
+  loadingSessions = true
+  updateControls()
+  try { await createSession(paper); question.focus() }
+  catch (error) { notify(error.message) }
+  finally { loadingSessions = false; updateControls() }
+}
+byId('rename-session').onclick = async () => {
+  document.querySelector('.session-actions').open = false
+  const title = prompt('Session name', session?.title)?.trim()
+  if (!title || !paper || !session) return
+  const doc = paper
+  const id = session._id
+  try {
+    const item = await api(sessionsURL(doc) + '/' + id, { method: 'PATCH', data: { title } })
+    if (paper !== doc) return
+    sessions = sessions.map(entry => entry._id === id ? item : entry)
+    if (session?._id === id) session.title = item.title
+    renderSessions()
+  } catch (error) { notify(error.message) }
+}
+byId('delete-session').onclick = async () => {
+  document.querySelector('.session-actions').open = false
+  if (!paper || !session || !confirm('Delete this session and its messages?')) return
+  const doc = paper
+  const id = session._id
+  try {
+    await api(sessionsURL(doc) + '/' + id, { method: 'DELETE' })
+    if (paper === doc) await fetchSessions(doc)
+  } catch (error) { notify(error.message) }
+}
+
+async function* readEvents(response) {
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for await (const bytes of response.body) {
+    buffer += decoder.decode(bytes, { stream: true })
+    let newline
+    while ((newline = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, newline)
+      buffer = buffer.slice(newline + 1)
+      if (line.trim()) yield JSON.parse(line)
+    }
+  }
+}
+
 byId('ask-form').onsubmit = async event => {
   event.preventDefault()
   const prompt = question.value.trim()
-  if (!prompt || !paper || !toolsReady || request) return
+  if (!prompt || !paper || !toolsReady || loadingSessions || request) return
   const doc = paper
   const selection = scope
   const provider = modelSelect.value
+  const mode = byId('mode').value
   const name = modelSelect.selectedOptions[0].textContent
   const controller = new AbortController()
   request = controller
   question.value = ''
   updateControls()
-  addMessage(selection ? 'You · page ' + selection.page : 'You · whole paper', prompt, 'reader-message')
-  const pending = addMessage(name, 'Preparing paper text…')
+  let pending
+  let fragments = ''
   try {
+    const current = session || await createSession(doc)
+    controller.signal.throwIfAborted()
+    addMessage(selection ? 'You · page ' + selection.page : 'You · whole paper', prompt, 'reader-message')
+    pending = addMessage(name, 'Preparing paper text…')
+    pending.classList.add('streaming-text')
     const context = await getContext(doc, selection, controller.signal)
-    pending.textContent = 'Reading and writing a reply…'
-    const { answer } = await api('/api/ask', {
+    pending.textContent = 'Reading the paper…'
+    const response = await fetch(sessionsURL(doc) + '/' + current._id + '/ask', {
       method: 'POST', signal: controller.signal,
-      data: {
-        provider, scope: selection ? 'selection' : 'paper', title: doc.title, question: prompt,
-        context, selection: selection?.text, history
-      }
+      headers: { 'Content-Type': 'application/json', 'X-DeepPaper': '1' },
+      body: JSON.stringify({
+        provider, mode, scope: selection ? 'selection' : 'paper', title: doc.title, question: prompt,
+        context, selection: selection?.text, selectionPage: selection?.page
+      })
     })
-    history = [...history, { role: 'user', content: prompt }, { role: 'assistant', content: answer.slice(0, 12000) }].slice(-8)
-    pending.parentElement.remove()
-    addMessage(name, answer, '', true)
+    if (!response.ok) throw new Error((await response.json()).error || 'Could not ask the model.')
+    let saved = false
+    for await (const event of readEvents(response)) {
+      if (event.type === 'delta') {
+        const follow = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 70
+        fragments += event.text
+        pending.textContent = fragments
+        if (follow) messages.scrollTop = messages.scrollHeight
+      } else if (event.type === 'error') {
+        throw new Error(event.error)
+      } else if (event.type === 'done') {
+        saved = true
+        const item = event.session
+        sessions = [item, ...sessions.filter(entry => entry._id !== item._id)]
+        displaySession({ ...item, messages: [...current.messages, ...event.turns] })
+      }
+    }
+    if (!saved) throw new Error('The stream closed before the answer was saved.')
   } catch (error) {
     if (controller.signal.aborted) return
+    if (!pending) pending = addMessage(name, '')
     pending.parentElement.classList.add('error')
-    pending.textContent = error.message
+    pending.textContent = fragments ? fragments + '\n\n' + error.message : error.message
     if (!question.value.trim()) question.value = prompt
   } finally {
     if (request === controller) {
@@ -534,9 +693,10 @@ question.addEventListener('keydown', event => {
   }
 })
 
+const { upload } = initLibrary({ api, openReader, closeReader })
 const fileInput = byId('file')
 fileInput.onchange = () => {
-  openPDF(fileInput.files[0])
+  upload(fileInput.files[0])
   fileInput.value = ''
 }
 byId('choose').onclick = () => fileInput.click()
@@ -552,7 +712,7 @@ for (const name of ['dragenter', 'dragover', 'drop']) {
     event.preventDefault()
     if (name === 'drop') {
       reader.classList.remove('dragover')
-      openPDF(event.dataTransfer.files[0])
+      upload(event.dataTransfer.files[0])
     } else reader.classList.add('dragover')
   })
 }
